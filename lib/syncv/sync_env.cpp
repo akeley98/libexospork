@@ -20,6 +20,13 @@ namespace exospork
 namespace
 {
 
+enum class SyncType
+{
+    Fence,
+    Arrive,
+    Await,
+};
+
 struct PendingAwaitListNode
 {
     pending_await_t await_id;
@@ -243,7 +250,8 @@ struct SyncEnv
 {
     // Failure flag
     // This is to be set upon an exception being thrown through the non-private
-    // interface. If this happens, the internal state may be inconsistent.
+    // interface. If this happens, the internal state may be inconsistent, but memory
+    // shouldn't be formally leaked since we'll delete the memory pools later anyway.
     // Ignore all further SyncEnv commands if failed = true.
     bool failed = false;
 
@@ -347,8 +355,8 @@ struct SyncEnv
         VisRecordListNode& node = get(id);
         if (0 == --node.refcnt) {
             if (node.is_forwarded()) {
-                // decref owning reference to forwarded visibility record,
-                // then add physical storage of victim visibility record to free chain.
+                // Add physical storage of victim visibility record to free chain,
+                // then decref owning reference to forwarded-to visibility record,
                 auto fwd_id = node.exospork_next_id;
                 assert(fwd_id);
                 free_single_vis_record(id);
@@ -356,8 +364,9 @@ struct SyncEnv
             }
             else {
                 // Non-forwarded (base) visibility record must be removed from memoization first.
-                auto memoized_id = remove_memoized(node);
+                auto memoized_id = remove_memoized(&node);
                 assert(id == memoized_id);
+                assert(get(memoized_id).exospork_next_id == 0);  // Should have been removed from bucket's list.
                 free_single_vis_record(memoized_id);
             }
         }
@@ -449,7 +458,10 @@ struct SyncEnv
 
         nodepool::id<VisRecordListNode> vis_record_id;
         VisRecordListNode& vis_record = alloc_default_node(&vis_record_id);
+        vis_record.refcnt = 1;
         vis_record.base_data.visibility_set = sigthreads_id;
+
+        assert(equal(vis_record.base_data, init_interval));
 
         return vis_record_id;
     }
@@ -460,6 +472,9 @@ struct SyncEnv
     // and sync_bit on an interval means to include it in both V_S and V_A, and not just V_A.
     void union_sigthread_interval(VisRecord* p, SigthreadInterval input)
     {
+        // The current model doesn't allow for augmenting only V_A without V_S, remove this if that changes.
+        assert(!input.async_only());
+
         // Non-empty input check (cross product of non-empty thread interval and non-empty actor signature set).
         assert(input.tid_hi > input.tid_lo);
         assert(0 != (input.bitfield & ~input.sync_bit));
@@ -470,18 +485,21 @@ struct SyncEnv
         assert(p->visibility_set);
 
         // Modify and/or add intervals.
-        // We can view each pointer-to-node_id as a "gap" between intervals, including the
-        // "gap" before the leftmost and after the rightmost intervals.
+        // We can view each pointer-to-node_id as a "gap" between intervals (imagine an arrow between nodes = a gap).
+        // We abuse language to consider there to be a "gap" before the leftmost and after the rightmost intervals.
         // This runs for N+1 iterations where N is the current interval count.
         uint32_t gap_tid_lo = 0;
         for (node_id* p_id = &p->visibility_set; 1;) {
             // Must remember the next iteration's node now, so we don't get confused by insertion.
             const node_id original_next_node_id = *p_id;
-            uint32_t gap_tid_hi = input.tid_hi;  // For "gap" after the rightmost interval.
 
+            uint32_t gap_tid_hi;
             if (original_next_node_id) {
                 gap_tid_hi = get(original_next_node_id).data.tid_lo;
                 assert(gap_tid_lo <= gap_tid_hi);  // intervals were out of order.
+            }
+            else {
+                gap_tid_hi = input.tid_hi;  // For "gap" after the rightmost interval.
             }
 
             // If the gap is non-empty and overlaps the input interval, we need to insert a new interval.
@@ -504,7 +522,7 @@ struct SyncEnv
             // We will modify each original interval, which is the "next node" of the gap just processed.
             //
             // The interval may be subdivided into up to 3 intervals depending on overlap with input interval,
-            // since only the overlap should have its bitfield modified.
+            // since only the overlapped portion should have its bitfield modified.
             //
             // 1st interval: keeps original bits, left of intersection.
             // 2nd interval: bitfield augmented, footprint of intersection.
@@ -537,7 +555,7 @@ struct SyncEnv
                 next_node.data.tid_hi = intersect_tid_hi;
                 next_node.data.bitfield |= added_bits;
 
-                // 3rd interval, insert after.
+                // Possibly add 3rd interval, insert after 2nd interval.
                 if (intersect_tid_hi < original_data.tid_hi) {
                     node_id new_node_id{};
                     SigthreadIntervalListNode& new_node = alloc_default_node(&new_node_id);
@@ -591,7 +609,7 @@ struct SyncEnv
         assert(a.visibility_set);
         assert(b.visibility_set);
 
-        // Check equal intervals. We rely (and enforce) the non-redundant encoding requirement.
+        // Check equal intervals. We rely on (and enforce) the non-redundant encoding requirement.
         {
             using node_id = nodepool::id<SigthreadIntervalListNode>;
             node_id id_a = a.visibility_set;
@@ -636,6 +654,21 @@ struct SyncEnv
         return id_a == id_b;  // Check lists had the same length.
     }
 
+    // Check if a visibility record consists solely of the given sigthread interval as its visibility set.
+    bool equal(const VisRecord& a, SigthreadInterval interval)
+    {
+        // Must not have empty visibility set (forwarding state passed?)
+        assert(a.visibility_set);
+
+        if (a.pending_await_list) {
+            return false;
+        }
+
+        // Check if only one interval, and it equals the input interval.
+        const SigthreadIntervalListNode& node = get(a.visibility_set);
+        return !node.exospork_next_id && node.data == interval;
+    }
+
     template <bool SyncOnly>
     bool visible_to_impl(const VisRecord& vis_record, SigthreadInterval access_set)
     {
@@ -657,11 +690,13 @@ struct SyncEnv
         return false;
     }
 
+    // Check if the visibility record is visible-to an access with the given sigthread access set.
     bool visible_to(const VisRecord& vis_record, SigthreadInterval access_set)
     {
         return visible_to_impl<true>(vis_record, access_set);
     }
 
+    // Check if the visibility record synchronizes-with a synchronization statement with the given first visibility set.
     bool synchronizes_with(const VisRecord& vis_record, SigthreadInterval V1)
     {
         return visible_to_impl<false>(vis_record, V1);
@@ -674,8 +709,9 @@ struct SyncEnv
 
 
     // Get the smallest possible sigthread interval that is a superset of
-    // the given visibility set (ignore async_bit); assumes non-empty input set.
-    // This is needed to index into the correct bucket.
+    // the given visibility set (ignore sync_bit); assumes non-empty input set.
+    // This is needed to index into the correct bucket (the smallest one possible containing the visibility set).
+    // Note, at time of writing the sigbits aren't used for bucketing, but maybe they should be.
     SigthreadInterval minimal_superset_interval(nodepool::id<SigthreadIntervalListNode> id) const
     {
         assert(id);
@@ -727,6 +763,7 @@ struct SyncEnv
         *p_id = id;
         return p_node->base_data;
     }
+
 
     enum class BucketProcessType
     {
@@ -882,16 +919,286 @@ struct SyncEnv
         return result_id;
     }
 
-    nodepool::id<VisRecordListNode> remove_memoized(const VisRecordListNode& node) noexcept
+    // Find visibility record in memoization bucket for which lambda(const VisRecord&) returns true.
+    // Returns pointer to ID of record found (non-owning), or null if not found.
+    template <typename Lambda>
+    nodepool::id<VisRecordListNode>* bucket_search(nodepool::id<VisRecordListNode>* p_bucket_head, Lambda&& lambda)
     {
-        return for_buckets<BucketProcessType::Find>(minimal_superset_interval(node.base_data.visibility_set), 3);
+        using node_id = nodepool::id<VisRecordListNode>;
+        node_id* p_id = p_bucket_head;
+
+        for (node_id id; (id = *p_id); ) {
+            VisRecordListNode& node = get(id);
+            assert(!node.is_forwarded());  // Should not be in memoization table.
+
+            if (lambda(node.base_data)) {
+                return p_id;
+            }
+
+            p_id = &node.exospork_next_id;
+        }
+        return nullptr;
+    }
+
+    struct NewVisRecordCommand
+    {
+        SigthreadInterval init_interval;
+    };
+
+    // Add a new visibility record, or return existing memoized one, constructed from the given sigthread interval set.
+    // The returned ID is an owning reference.
+    [[nodiscard]] nodepool::id<VisRecordListNode> memoize_new_vis_record(SigthreadInterval init_interval)
+    {
+        assert(init_interval.tid_hi > init_interval.tid_lo);
+        assert(init_interval.sigbits() != 0);
+
+        NewVisRecordCommand command{init_interval};
+        nodepool::id<VisRecordListNode> id = for_buckets<BucketProcessType::Insert>(init_interval, command);
+        assert(id);
+        assert(equal(get(id).base_data, init_interval));
+        return id;
+    }
+
+    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head,
+                                                   NewVisRecordCommand command)
+    {
+        auto lambda = [this, command] (const VisRecord& record) {
+            return equal(record, command.init_interval);
+        };
+        nodepool::id<VisRecordListNode>* p_found_id = bucket_search(p_bucket_head, lambda);
+
+        nodepool::id<VisRecordListNode> new_id;
+
+        if (p_found_id) {
+            // Existing memoized entry found, forward to it.
+            VisRecordListNode& new_node = alloc_default_node(&new_id);
+            assert(!new_node.exospork_next_id);
+            new_node.refcnt = 1;
+
+            assert(*p_found_id);
+            new_node.exospork_next_id = *p_found_id;
+            incref(new_node.exospork_next_id);
+            assert(new_node.is_forwarded());
+        }
+        else {
+            // Add memoized base visibility set entry to bucket of memoization table.
+            new_id = alloc_visibility_record(command.init_interval);
+            assert(!get(new_id).exospork_next_id);
+            assert(get(new_id).refcnt == 1);
+            assert(!get(new_id).is_forwarded());
+            insert_next_node(p_bucket_head, new_id);
+        }
+        assert(new_id);
+        return new_id;
+    }
+
+    struct RemoveMemoizedCommand
+    {
+        const VisRecordListNode* p_node;
+    };
+
+    // This removes the given node from the memoization table, but does not decrement the reference count or free it.
+    // Recall that the memoization table does not own (reference count) the VisRecords contained.
+    [[nodiscard]] nodepool::id<VisRecordListNode> remove_memoized(const VisRecordListNode* p_node) noexcept
+    {
+        assert(p_node);
+        assert(p_node->refcnt == 0);
+        assert(!p_node->is_forwarded());
+
+        RemoveMemoizedCommand command{p_node};
+        auto bucket_key = minimal_superset_interval(p_node->base_data.visibility_set);
+        return for_buckets<BucketProcessType::Find>(bucket_key, command);
     }
 
     // Find and remove node in bucket.
-    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_head, int)
+    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head,
+                                                   RemoveMemoizedCommand command)
     {
-        return {};
+        auto lambda = [this, command] (const VisRecord& record) {
+            return equal(record, command.p_node->base_data);
+        };
+        nodepool::id<VisRecordListNode>* p_id = bucket_search(p_bucket_head, lambda);
+        if (p_id) {
+            return remove_next_node(p_id);
+        }
+        else {
+            return {};
+        }
     }
+
+    struct MemoizeOrForwardCommand
+    {
+        nodepool::id<VisRecordListNode> input_id;
+    };
+
+    // Given an existing visibility record in the base state that's not in the memoization table, either
+    //   * Add it to the memoization table, if it's unique
+    //   * Put it in the forwarding state (discard existing state) and forward to equal already-memoized record.
+    void memoize_or_forward(nodepool::id<VisRecordListNode> id)
+    {
+        assert(id);
+        VisRecordListNode& node = get(id);
+        assert(node.refcnt != 0);
+        assert(!node.is_forwarded());
+        assert(!node.exospork_next_id);  // shouldn't be in any linked list (memoization bucket or forwarded?)
+
+        MemoizeOrForwardCommand command{id};
+        auto bucket_key = minimal_superset_interval(node.base_data.visibility_set);
+        for_buckets<BucketProcessType::Insert>(bucket_key, command);
+    }
+
+    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head,
+                                                   MemoizeOrForwardCommand command)
+    {
+        VisRecordListNode& input_node = get(command.input_id);
+        VisRecord input_vis_record = input_node.base_data;
+
+        auto lambda = [this, input_vis_record] (const VisRecord& record) {
+            return equal(record, input_vis_record);
+        };
+
+        nodepool::id<VisRecordListNode>* p_id = bucket_search(p_bucket_head, lambda);
+        if (p_id) {
+            // If equivalent memoized node found in bucket, forward input node to it.
+            const nodepool::id fwd_id = *p_id;
+            assert(fwd_id);
+            assert(fwd_id != command.input_id);  // Trying to memoize something already in the memoization table.
+
+            reset_vis_record_data(&input_node.base_data);
+            input_node.exospork_next_id = fwd_id;
+            assert(input_node.is_forwarded());
+            incref(fwd_id);  // Forwarding reference is owning.
+        }
+        else {
+            // Insert input node to memoization bucket. No refcnt changes needed for memoization.
+            // IMPORTANT: this memoization is at the start of the bucket. This means if the caller of this function
+            // is processing this bucket, the caller probably won't encounter this node. See process_buckets_for_sync.
+            insert_next_node(p_bucket_head, command.input_id);
+        }
+
+        return command.input_id;
+    }
+
+    struct FenceUpdateCommand
+    {
+        SigthreadInterval V1;
+        SigthreadInterval V2;
+
+        void update_for_sync(SyncEnv& env, VisRecord* p_record) const
+        {
+            if (env.synchronizes_with(*p_record, V1)) {
+                env.union_sigthread_interval(p_record, V2);
+            }
+        };
+    };
+
+    struct ArriveUpdateCommand
+    {
+        SigthreadInterval V1;
+        pending_await_t await_id;
+
+        void update_for_sync(SyncEnv& env, VisRecord* p_record) const
+        {
+            if (env.synchronizes_with(*p_record, V1)) {
+                env.add_pending_await(p_record, await_id);
+            }
+        }
+    };
+
+    struct AwaitUpdateCommand
+    {
+        SigthreadInterval V1;
+        SigthreadInterval V2;
+        pending_await_t await_id;
+
+        void update_for_sync(SyncEnv& env, VisRecord* p_record) const
+        {
+            if (env.remove_pending_await(p_record, await_id)) {
+                assert(env.synchronizes_with(*p_record, V1));
+                env.union_sigthread_interval(p_record, V2);
+            }
+        }
+    };
+
+    // Big payoff for all this code: function that performs the effects of a synchronization statement with the given
+    // sync type and given first/second visibility sets. This affects all visibility records whose visibility set
+    // intersects with the first visibility set of the synchronization statement.
+    //
+    // The real entrypoints are the ones specialized for fence, arrive, await.
+    template <typename Command>
+    void update_vis_records_for_sync_impl(const Command& command)
+    {
+        // Only visibility sets that intersect the first visibility set (V1) can be updated by this sync.
+        // This is even the case for Await, assuming the V1 for the corresponding Arrive was correctly given.
+        const SigthreadInterval minimal_superset = command.V1;
+        for_buckets<BucketProcessType::MapAll>(minimal_superset, command);
+    }
+
+    template <typename Command>
+    void process_bucket_for_sync_impl(nodepool::id<VisRecordListNode>* p_bucket_head, const Command& command)
+    {
+        // The bucket update process for handling the effects of synchronization on visibility records is quite
+        // risky actually. When we modify a visibility record, we temporarily remove it from the memoization bucket,
+        // modify it, then attempt to re-insert it. This is fundamentally needed since the modification may
+        // cause a duplicate to be created, or a node to be in the wrong bucket.
+        //
+        // However, this re-insertion may cause the memoization table to be modified unexpectedly.
+        // We have to be very careful when traversing the bucket's linked list, and this also explains
+        // the IntervalBucket::visitor_count value, if it still exists; (see for_buckets_impl).
+        //
+        // Note, everything will be left in an inconsistent state in case an exception is thrown.
+
+        using node_id = nodepool::id<VisRecordListNode>;
+        node_id* p_id = p_bucket_head;
+
+        // This might be really confusing. p_id is a pointer to a node ID.
+        // It could be a pointer to the bucket (itself the ID of the head of the bucket node list) or it
+        // could be the pointer to the exospork_next_id member of the PREVIOUS node (relative to current_node).
+        while (node_id current_node_id = *p_id) {
+            // Now the current node is temporarily removed from the bucket linked list.
+            // ("next_node" reflects the "pointer to previous node" viewpoint explained above).
+            // *p_id will now be the ID of the node that formerly was after current_node, which (if not ID = 0)
+            // is the node that we should process on the next iteration.
+            VisRecordListNode& current_node = get(remove_next_node(p_id));
+            assert(!current_node.exospork_next_id);// Should have been removed from list.
+            assert(!current_node.is_forwarded());  // Invalid empty visibility set (forwarding state memoized?)
+
+            // Update the visibility record stored in the node.
+            command.update_for_sync(*this, &current_node.base_data);
+            assert(p_id != &current_node.exospork_next_id);
+
+            // This is where the node might get re-inserted to the memoization table.
+            // *p_id might change value here again, but it's guaranteed p_id doesn't point inside &current_node.
+            memoize_or_forward(current_node_id);
+
+            // This part is dicey. We removed the node from the memoization table, then possibly re-inserted it,
+            // either into another bucket, or at the head of this bucket. See the weird assert below.
+            // Also see process_bucket(, MemoizeOrForwardCommand).
+            // It's possible we re-inserted exactly into its old place, so we need to do some special logic
+            // to avoid getting stuck in an infinite loop.
+            if (*p_id == current_node_id) {
+                // I'm fairly sure this is the only reason this branch should happen, due to how we insert nodes
+                // only at the head of buckets. If this assert goes off, the code may still be correct;
+                // this is just a warning-to-self to check that my mental model is correct.
+                assert(p_id == p_bucket_head);
+                p_id = &get(current_node_id).exospork_next_id;
+            }
+        }
+    }
+
+    // Augment all visibility records that synchronize with the first visibility set of the fence.
+    void update_vis_records_for_fence(SigthreadInterval V1, SigthreadInterval V2)
+    {
+        FenceUpdateCommand command{V1, V2};
+        update_vis_records_for_sync_impl(command);
+    }
+
+    void process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head, const FenceUpdateCommand& command)
+    {
+        process_bucket_for_sync_impl(p_bucket_head, command);
+    }
+
+    // TODO arrive, await
 };
 
 }  // end namespace

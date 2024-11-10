@@ -13,9 +13,9 @@ namespace exospork
 // A sigthread interval is the cross product
 //     [tid_lo, tid_hi) \times A
 // where A is a set of actor signatures defined by the bits set in
-//     bitfield & sigbits_mask
+//     bitfield & sigbits()
 //
-// The async bit is used elsewhere, to help store V_A and V_S compactly.
+// The sync_bit is used elsewhere, to help store V_A and V_S compactly.
 // (The async visibility set and sync visibility set).
 struct SigthreadInterval
 {
