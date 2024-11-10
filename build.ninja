@@ -1,0 +1,18 @@
+rule cxx
+  command = c++ -fdiagnostics-color=always -I include -O2 -Wall -Wextra -fPIC -g -std=c++17 $in -c -o $out -MD -MF $out.d
+  depfile = $out.d
+
+rule link_lib
+  command = c++ $in -shared -o $out
+
+rule link_test
+  command = c++ $in -L . -o $out
+
+build bin/lib/syncv/syncv.o: cxx lib/syncv/syncv.cpp
+build bin/lib/syncv/sync_env.o: cxx lib/syncv/sync_env.cpp
+
+build bin/tests/test_exospork.o: cxx tests/test_exospork.cpp
+
+build bin/libexospork.so: link_lib bin/lib/syncv/syncv.o bin/lib/syncv/sync_env.o
+
+build bin/test_exospork: link_test bin/tests/test_exospork.o bin/libexospork.so 
