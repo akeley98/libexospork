@@ -44,6 +44,17 @@ struct SigthreadInterval
         return bitfield & ~sync_bit;
     }
 
+    // Requires that exactly one actor signature is set.
+    // Return the bit index of that actor signature (e.g. 8 -> 3)
+    uint8_t get_unique_actor_signature() const
+    {
+        unsigned bits{sigbits()};
+        assert(bits != 0);
+        uint8_t bit_index = uint8_t(__builtin_ctz(bits));
+        assert(bits == 1u << bit_index);
+        return bit_index;
+    }
+
     bool operator==(SigthreadInterval other) const
     {
         uint32_t diff = tid_lo ^ other.tid_lo;
@@ -57,15 +68,15 @@ struct SigthreadInterval
         return !(*this == other);
     }
 
-    bool intersects(const SigthreadInterval& other) const
+    bool intersects(const SigthreadInterval& other, uint32_t sigbits_mask = ~uint32_t(0)) const
     {
         // <= due to tid_hi being an exclusive bound.
         const bool tid_disjoint = tid_hi <= other.tid_lo || other.tid_hi <= tid_lo;
-        const uint32_t this_sigbits = sigbits();
+        uint32_t this_sigbits = sigbits();
         const uint32_t other_sigbits = other.sigbits();
         assert(this_sigbits != 0);
         assert(other_sigbits != 0);
-        return !tid_disjoint && 0 != (this_sigbits & other_sigbits);
+        return !tid_disjoint && 0 != (this_sigbits & other_sigbits & sigbits_mask);
     }
 };
 

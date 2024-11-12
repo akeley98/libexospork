@@ -1,10 +1,11 @@
 #pragma once
 #include <cassert>
-#include <deque>
+#include <memory>
 #include <new>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <vector>
 
 namespace exospork
 {
@@ -22,6 +23,11 @@ struct id
     operator bool() const
     {
         return _1_index != 0;
+    }
+
+    bool operator<(id other) const
+    {
+        return _1_index < other._1_index;
     }
 
     bool operator==(id other) const
@@ -43,17 +49,16 @@ struct id
 template <typename ListNode>
 class Pool
 {
-    static constexpr uint32_t chunk_size = (8u << 20) / sizeof(ListNode);
-    static_assert(chunk_size >= 2u, "don't pool if your nodes are this huge");
+    static constexpr uint32_t chunk_size = 4096;
+    static_assert(sizeof(ListNode) <= 64, "Re-evaluate chunk_size");
 
     struct Chunk
     {
         ListNode storage[chunk_size];
     };
 
-    // Note, pointers to deque items are not invalidated by push_back,
-    // unlike std::vector.
-    std::deque<Chunk> chunks;
+    // [(_1_index - 1) / chunk_size][(_1_index - 1) % chunk_size]
+    std::vector<std::unique_ptr<Chunk>> chunks;
 
     // ID of first item in the free list.
     id<ListNode> free_list_head{0};
@@ -70,7 +75,7 @@ class Pool
         assert(_id._1_index != 0);
         auto _0_index = _id._1_index - 1u;
         assert(_0_index < chunks.size() * chunk_size);
-        return chunks[_0_index / chunk_size].storage[_0_index % chunk_size];
+        return chunks[_0_index / chunk_size]->storage[_0_index % chunk_size];
     }
 
     ListNode& get(id<ListNode> _id) noexcept
@@ -89,7 +94,7 @@ class Pool
                 throw std::bad_alloc{};
             }
             const uint32_t old_chunk_count = uint32_t(chunks.size());
-            chunks.push_back({});
+            chunks.push_back(std::make_unique<Chunk>());
 
             // ID overflow check
             assert(chunks.size() * chunk_size < UINT32_MAX);
@@ -100,7 +105,7 @@ class Pool
             }
 
             // Record allocation against memory budget.
-            Chunk& new_chunk = chunks.back();
+            Chunk& new_chunk = *chunks.back();
             *p_memory_budget -= sizeof new_chunk;
 
             // Organize new chunk into the new free list.
@@ -151,11 +156,10 @@ class Pool
     void insert_next_node(id<ListNode>* p_insert_after, id<ListNode> insert_me) noexcept
     {
         assert(p_insert_after);
-        ListNode& current_node = get(*p_insert_after);
         ListNode& inserted_node = get(insert_me);
         assert(!inserted_node.exospork_next_id);
-        inserted_node.exospork_next_id = current_node.exospork_next_id;
-        current_node.exospork_next_id = insert_me;
+        inserted_node.exospork_next_id = *p_insert_after;
+        *p_insert_after = insert_me;
     }
 
     // Given a pointer to the exospork_next_id member of a node,
@@ -163,7 +167,7 @@ class Pool
     //
     // The returned node automatically has its exospork_next_id nulled,
     // but is not automatically free'd; pass to extend_free_list later.
-    id<ListNode> remove_next_node(id<ListNode>* p_id) noexcept
+    [[nodiscard]] id<ListNode> remove_next_node(id<ListNode>* p_id) noexcept
     {
         assert(*p_id);
         const id<ListNode> ret = *p_id;
@@ -172,7 +176,39 @@ class Pool
         removed_node.exospork_next_id._1_index = 0;
         return ret;
     };
+
+    // Get number of nodes in pool (both allocated and free)
+    // This is mainly for testing and debugging.
+    uint32_t size() const noexcept
+    {
+        const size_t sz = chunks.size() * chunk_size;
+        assert(sz <= UINT32_MAX);
+        return uint32_t(sz);
+    }
+
+    // Get IDs of nodes on free chain. Mostly for debugging.
+    template <typename Set>
+    void get_free_ids(Set* p_set) const
+    {
+        auto id = free_list_head;
+        while (id) {
+            p_set->insert(id);
+            id = get(id).exospork_next_id;
+        }
+    }
 };
 
 }
+}
+
+namespace std
+{
+template <typename ListNode>
+struct hash<exospork::nodepool::id<ListNode>>
+{
+    size_t operator()(const exospork::nodepool::id<ListNode>& id) const
+    {
+        return id._1_index;
+    }
+};
 }

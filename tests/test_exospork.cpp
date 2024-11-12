@@ -1,6 +1,8 @@
 #include "exospork/syncv.h"
 
+#include "syncv/test_sync_env.hpp"
+
 int main()
 {
-    exospork_syncv_init(1, nullptr);
+    test_sync_env();
 }
