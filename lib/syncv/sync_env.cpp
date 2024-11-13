@@ -459,6 +459,7 @@ struct SyncEnv
         p_record->read_vis_records_head_id = {};
 
         p_record->assignment_id = 0;
+        p_record->last_sync_counter_bits = 0;
     }
 
 
