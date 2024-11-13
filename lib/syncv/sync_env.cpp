@@ -140,19 +140,17 @@ struct BarrierState
 };
 
 template <uint32_t Level> constexpr uint64_t bucket_level_size = 0;
-template<> constexpr uint64_t bucket_level_size<0>  = 1;
-template<> constexpr uint64_t bucket_level_size<1>  = 32;
-template<> constexpr uint64_t bucket_level_size<2>  = 128;
-template<> constexpr uint64_t bucket_level_size<3>  = 256;
-template<> constexpr uint64_t bucket_level_size<4>  = 512;
-template<> constexpr uint64_t bucket_level_size<5>  = 1024;
-template<> constexpr uint64_t bucket_level_size<6>  = 0x1000;
-template<> constexpr uint64_t bucket_level_size<7>  = 0x1'0000;
-template<> constexpr uint64_t bucket_level_size<8>  = 0x10'0000;
-template<> constexpr uint64_t bucket_level_size<9>  = 0x100'0000;
-template<> constexpr uint64_t bucket_level_size<10> = 0x1000'0000;
-template<> constexpr uint64_t bucket_level_size<11> = 0x1'0000'0000;
-constexpr uint32_t bucket_level_count         = 12;
+template<> constexpr uint64_t bucket_level_size<0> = 1;
+template<> constexpr uint64_t bucket_level_size<1> = 32;
+template<> constexpr uint64_t bucket_level_size<2> = 128;
+template<> constexpr uint64_t bucket_level_size<3> = 256;
+template<> constexpr uint64_t bucket_level_size<4> = 1024;
+template<> constexpr uint64_t bucket_level_size<5> = 4096;
+template<> constexpr uint64_t bucket_level_size<6> = 16384;
+template<> constexpr uint64_t bucket_level_size<7> = 0x10'0000;
+template<> constexpr uint64_t bucket_level_size<8> = 0x400'0000;
+template<> constexpr uint64_t bucket_level_size<9> = 0x1'0000'0000;
+constexpr uint32_t bucket_level_count = 10;
 
 template <uint32_t BucketLevel> struct IntervalBucket;
 
@@ -974,7 +972,7 @@ struct SyncEnv
         constexpr bool ExactType = Type != BucketProcessType::MapAll;
         nodepool::id<VisRecordListNode> result_id{};
 
-        // Calculate range of child buckets that intersect the input interval.
+        // Calculate inclusive range of child buckets that intersect the input interval.
         constexpr uint32_t child_size{bucket_level_size<BucketLevel - 1>};
         const uint32_t child_min_index = relative_tid_lo < 0 ? 0u : uint32_t(relative_tid_lo) / child_size;
         const uint32_t child_max_index = std::min(uint32_t(relative_tid_hi - 1) / child_size,
@@ -1869,7 +1867,8 @@ SyncEnv* new_sync_env(const exospork_syncv_init_t& init)
 
 void delete_sync_env(SyncEnv* p_env)
 {
-    // XXX temporary assert. This could go off due to the user not free-ing their own stuff.
+    // XXX temporary assert. This could go off due to the user not free-ing their own stuff, which I consider valid
+    // (if suboptimal) usage, since deleting SyncEnv cleans up all physical memory allocations anyway.
     assert(p_env->failed || interval_bucket_is_empty(p_env->top_level_bucket));
 
     delete p_env;
