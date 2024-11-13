@@ -10,6 +10,7 @@
 #include <tuple>
 
 #include "sigthread.hpp"
+#include "../util/bit_util.hpp"
 #include "../util/node_pool.hpp"
 
 #include "../../include/exospork/syncv.h"
@@ -111,7 +112,7 @@ struct AssignmentRecord
     uint64_t assignment_id : 52;
 
     // See assignment_record_remove_duplicates.
-    uint64_t last_sync_counter_bits : 12;
+    uint64_t last_augment_counter_bits : 12;
 };
 
 static_assert(sizeof(AssignmentRecord) == sizeof(exospork_syncv_value_t));
@@ -126,18 +127,12 @@ inline const AssignmentRecord* from_api(const exospork_syncv_value_t* p)
     return reinterpret_cast<const AssignmentRecord*>(p);
 }
 
-inline exospork_syncv_value_t* to_api(AssignmentRecord* p)
-{
-    return reinterpret_cast<exospork_syncv_value_t*>(p);
-}
-
 struct BarrierState
 {
-    uint32_t max_pipelining = 0;
-    uint32_t arrive_count = 0;
-    uint32_t await_count = 0;
-    SigthreadInterval arrive_sigthreads = {};
-    SigthreadInterval await_sigthreads = {};
+    uint32_t arrive_count;
+    uint32_t await_count;
+    SigthreadInterval arrive_sigthreads;
+    SigthreadInterval await_sigthreads;
 };
 
 template <uint32_t Level> constexpr uint64_t bucket_level_size = 0;
@@ -284,7 +279,7 @@ struct SyncEnv
 
     // Counters for operations
     uint64_t assignment_counter = 0;  // Write counter
-    uint64_t sync_counter = 0;        // Sync operation counter
+    uint64_t augment_counter = 0;     // Number of fence+arrive
     uint64_t operation_counter = 0;   // All operations counter
 
     // Memory pool state.
@@ -296,8 +291,8 @@ struct SyncEnv
         nodepool::Pool<VisRecordListNode>,
         nodepool::Pool<ReadVisRecordListNode>> pool_tuple;
 
-    // Barrier state. TODO
-    // The Nth bit is set if N is allocated as a barrier ID.
+    // Barrier state.
+    // The Nth bit is 1 if N is allocated as a barrier ID.
     uint64_t live_barrier_bits[max_live_barriers / 64] = {0};
     BarrierState barrier_states[max_live_barriers];
 
@@ -462,7 +457,7 @@ struct SyncEnv
         p_record->read_vis_records_head_id = {};
 
         p_record->assignment_id = 0;
-        p_record->last_sync_counter_bits = 0;
+        p_record->last_augment_counter_bits = 0;
     }
 
 
@@ -769,6 +764,60 @@ struct SyncEnv
     bool synchronizes_with(const VisRecord& vis_record, SigthreadInterval V1)
     {
         return visible_to_impl<false, Transitive>(vis_record, V1);
+    }
+
+
+
+    // *** Barrier ID Allocation ***
+    // For now exospork_syncv_barrier_t::data only stores the barrier ID number + 1, but this could change.
+
+
+
+    uint32_t get_barrier_id(const exospork_syncv_barrier_t* bar)
+    {
+        assert(bar->data != 0);
+        const auto id = (bar->data - 1);
+        assert(id < max_live_barriers);
+        return uint32_t(id);
+    }
+
+    void set_barrier_id(exospork_syncv_barrier_t* bar, uint32_t id)
+    {
+        assert(id < max_live_barriers);
+        bar->data = id + 1;
+    }
+
+    void alloc_barrier(exospork_syncv_barrier_t* bar)
+    {
+        assert(bar->data == 0);
+        uint32_t barrier_index = ~0u;
+
+        for (uint32_t word_index = 0; word_index < max_live_barriers / 64; ++word_index) {
+            uint64_t negated_bits = ~live_barrier_bits[word_index];
+            if (negated_bits != 0) {
+                uint8_t bit_index = pop_low_bit_index(&negated_bits);
+                barrier_index = word_index * 64 + bit_index;
+                set_barrier_id(bar, barrier_index);
+                live_barrier_bits[word_index] = ~negated_bits;
+                break;
+            }
+        }
+
+        if (barrier_index == ~0u) {
+            assert(0);  // TODO should not be assertion
+        }
+
+        barrier_states[barrier_index] = {};
+    }
+
+    void free_barrier(exospork_syncv_barrier_t* bar)
+    {
+        const auto barrier_id = get_barrier_id(bar);
+        uint64_t& word = live_barrier_bits[barrier_id / 64u];
+        const uint64_t bit = uint64_t(1) << (barrier_id & 63u);
+        assert((word & bit));  // Barrier ID was not allocated
+        word &= ~bit;
+        bar->data = 0;
     }
 
 
@@ -1218,8 +1267,6 @@ struct SyncEnv
     template <typename Command>
     void update_vis_records_for_sync_impl(const Command& command)
     {
-        ++sync_counter;
-
         // Only visibility sets that intersect the first visibility set (V1) can be updated by this sync.
         // This is even the case for Await, assuming the V1 for the corresponding Arrive was correctly given.
         const SigthreadInterval minimal_superset = command.V1;
@@ -1298,7 +1345,86 @@ struct SyncEnv
         process_bucket_for_sync_impl(p_bucket_head, command);
     }
 
-    // TODO arrive, await
+    // Save await_id into all visibility records that synchronize with the first visibility set of the fence.
+    void update_vis_records_for_arrive(SigthreadInterval V1, bool transitive, pending_await_t await_id)
+    {
+        if (transitive) {
+            ArriveUpdateCommand<true> command{V1, await_id};
+            update_vis_records_for_sync_impl(command);
+        }
+        else {
+            ArriveUpdateCommand<false> command{V1, await_id};
+            update_vis_records_for_sync_impl(command);
+        }
+    }
+
+    template <bool Transitive>
+    void process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head, const ArriveUpdateCommand<Transitive>& command)
+    {
+        process_bucket_for_sync_impl(p_bucket_head, command);
+    }
+
+    // Augment all visibility records with await_id saved.
+    // Assumes that V1 matches what was provided for the corresponding arrive.
+    // (if this is wrong, we may not update the correct buckets).
+    void update_vis_records_for_await(SigthreadInterval V1, SigthreadInterval V2, pending_await_t await_id)
+    {
+        AwaitUpdateCommand command{V1, V2, await_id};
+        update_vis_records_for_sync_impl(command);
+    }
+
+    void process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head, const AwaitUpdateCommand& command)
+    {
+        process_bucket_for_sync_impl(p_bucket_head, command);
+    }
+
+
+
+    // *** Synchronization State Update ***
+
+
+
+    void on_fence(SigthreadInterval V1, SigthreadInterval V2, bool transitive)
+    {
+        augment_counter++;
+        update_vis_records_for_fence(V1, V2, transitive);
+    }
+
+    void on_arrive(exospork_syncv_barrier_t* bar, SigthreadInterval V1, bool transitive)
+    {
+        const auto barrier_id = get_barrier_id(bar);
+        BarrierState& state = barrier_states[barrier_id];
+        const auto await_id = pack_pending_await(barrier_id, state.arrive_count);
+
+        if (state.arrive_count++ == 0) {
+            state.arrive_sigthreads = V1;
+        }
+        else {
+            assert(state.arrive_sigthreads == V1);  // TODO should not be assertion
+        }
+
+        update_vis_records_for_arrive(V1, transitive, await_id);
+    }
+
+    void on_await(exospork_syncv_barrier_t* bar, SigthreadInterval V2)
+    {
+        const auto barrier_id = get_barrier_id(bar);
+        BarrierState& state = barrier_states[barrier_id];
+        const auto await_id = pack_pending_await(barrier_id, state.await_count);
+
+        if (state.await_count++ == 0) {
+            state.await_sigthreads = V2;
+        }
+        else {
+            assert(state.await_sigthreads == V2);  // TODO should not be assertion
+        }
+
+        assert(state.arrive_count >= state.await_count);  // TODO should not be assertion
+        const SigthreadInterval V1 = state.arrive_sigthreads;
+
+        augment_counter++;
+        update_vis_records_for_await(V1, V2, await_id);
+    }
 
 
 
@@ -1343,7 +1469,7 @@ struct SyncEnv
                 assignment_record.write_vis_record_id = vis_record_id;
                 assignment_record.assignment_id = assignment_counter;
                 assert(assignment_record.assignment_id != 0);
-                assignment_record.last_sync_counter_bits = sync_counter;
+                assignment_record.last_augment_counter_bits = augment_counter;
             }
             else {
                 // Add the new visibility record to the list of read visibility records.
@@ -1354,12 +1480,12 @@ struct SyncEnv
 
                 // If we leave things as-is, read vis records may build up indefinitely for variables that are written
                 // once and read many times. We fix this by removing duplicates; however, this is really expensive,
-                // so we only do it once after each synchronization event (synchronization is when memoization kicks
+                // so we only do it once after each fence or arrive event (synchronization is when memoization kicks
                 // in to potentially allow us to recognize duplicates due to duplicated IDs).
-                const auto old_bits = assignment_record.last_sync_counter_bits;
-                assignment_record.last_sync_counter_bits = sync_counter;
-                if (old_bits != assignment_record.last_sync_counter_bits) {
-                    // This could fail if the bits of sync_counter overflow exactly.
+                const auto old_bits = assignment_record.last_augment_counter_bits;
+                assignment_record.last_augment_counter_bits = augment_counter;
+                if (old_bits != assignment_record.last_augment_counter_bits) {
+                    // This could fail if the bits of augment_counter overflow exactly.
                     // However, this is unlikely, and is only a performance issue if so (we fail to remove duplicates).
                     assignment_record_remove_duplicates(&assignment_record);
                 }
@@ -1554,10 +1680,38 @@ void clear_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values)
     INTERFACE_EPILOGUE(p_env)
 }
 
+void alloc_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar)
+{
+    INTERFACE_PROLOGUE(p_env)
+    p_env->alloc_barrier(bar);
+    INTERFACE_EPILOGUE(p_env)
+}
+
+void free_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar)
+{
+    INTERFACE_PROLOGUE(p_env)
+    p_env->free_barrier(bar);
+    INTERFACE_EPILOGUE(p_env)
+}
+
 void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2, bool transitive)
 {
     INTERFACE_PROLOGUE(p_env)
-    p_env->update_vis_records_for_fence(V1, V2, transitive);
+    p_env->on_fence(V1, V2, transitive);
+    INTERFACE_EPILOGUE(p_env)
+}
+
+void on_arrive(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V1, bool transitive)
+{
+    INTERFACE_PROLOGUE(p_env)
+    p_env->on_arrive(bar, V1, transitive);
+    INTERFACE_EPILOGUE(p_env)
+}
+
+void on_await(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V2)
+{
+    INTERFACE_PROLOGUE(p_env)
+    p_env->on_await(bar, V2);
     INTERFACE_EPILOGUE(p_env)
 }
 

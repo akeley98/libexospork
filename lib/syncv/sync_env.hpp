@@ -41,6 +41,7 @@ inline pending_await_t pack_pending_await(uint32_t barrier_id, uint32_t counter)
     const uint32_t id = barrier_id | counter << barrier_id_bits;
     assert(pending_await_barrier_id(id) == barrier_id);
     assert(pending_await_counter(id) == counter);
+    return id;
 }
 
 struct VisRecordDebugData
@@ -58,7 +59,11 @@ void delete_sync_env(SyncEnv* p_env);
 void on_r(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set);
 void on_rw(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set);
 void clear_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values);
+void alloc_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar);
+void free_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar);
 void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2, bool transitive);
+void on_arrive(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V1, bool transitive);
+void on_await(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V2);
 void begin_no_checking(SyncEnv* p_env);
 void end_no_checking(SyncEnv* p_env);
 

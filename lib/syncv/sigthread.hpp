@@ -3,6 +3,8 @@
 #include <cassert>
 #include <stdint.h>
 
+#include "../util/bit_util.hpp"
+
 namespace exospork
 {
 
@@ -48,9 +50,9 @@ struct SigthreadInterval
     // Return the bit index of that actor signature (e.g. 8 -> 3)
     uint8_t get_unique_actor_signature() const
     {
-        unsigned bits{sigbits()};
+        const auto bits = sigbits();
         assert(bits != 0);
-        uint8_t bit_index = uint8_t(__builtin_ctz(bits));
+        uint8_t bit_index = get_low_bit_index(bits);
         assert(bits == 1u << bit_index);
         return bit_index;
     }
