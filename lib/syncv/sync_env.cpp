@@ -16,9 +16,7 @@
 
 // Maybe replace later
 #include <unordered_map>
-#include <unordered_set>
 template <typename K, typename V> using Map = std::unordered_map<K, V>;
-template <typename V> using Set = std::unordered_set<V>;
 
 namespace exospork
 {
@@ -52,13 +50,17 @@ static_assert(sizeof(SigthreadIntervalListNode) == 16, "Check that you meant to 
 
 struct VisRecord
 {
-    uint8_t original_actor_signature;
-
     // Owning reference to singly-linked list.
     nodepool::id<SigthreadIntervalListNode> visibility_set;
 
     // Owning reference to singly-linked list.
     nodepool::id<PendingAwaitListNode> pending_await_list;
+
+    uint8_t original_actor_signature;
+
+    // This has nothing to do with the main purpose of the struct; only needed for assignment_record_remove_duplicates.
+    // This should be in VisRecordListNode conceptually, but that would waste 4 bytes.
+    uint8_t tmp_is_duplicate;
 };
 
 struct VisRecordListNode
@@ -105,7 +107,11 @@ struct AssignmentRecord
     // Zero or more read visibility records.
     nodepool::id<ReadVisRecordListNode> read_vis_records_head_id;
 
-    uint64_t assignment_id;
+    // Unique ID for this assignment
+    uint64_t assignment_id : 52;
+
+    // See assignment_record_remove_duplicates.
+    uint64_t last_sync_counter_bits : 12;
 };
 
 static_assert(sizeof(AssignmentRecord) == sizeof(exospork_syncv_value_t));
@@ -273,9 +279,10 @@ struct SyncEnv
     // Ignore all further SyncEnv commands if failed = true.
     bool failed = false;
 
-    // Assignment (write) counter, and all operations counter
-    uint64_t assignment_counter = 0;
-    uint64_t operation_counter = 0;
+    // Counters for operations
+    uint64_t assignment_counter = 0;  // Write counter
+    uint64_t sync_counter = 0;        // Sync operation counter
+    uint64_t operation_counter = 0;   // All operations counter
 
     // Memory pool state.
     uintptr_t original_memory_budget = 0;
@@ -1022,16 +1029,19 @@ struct SyncEnv
     struct NewVisRecordCommand
     {
         SigthreadInterval init_interval;
+        uint32_t added_refcnt;
     };
 
     // Add a new visibility record, or return existing memoized one, constructed from the given sigthread interval set.
-    // The returned ID is an owning reference.
-    [[nodiscard]] nodepool::id<VisRecordListNode> memoize_new_vis_record(SigthreadInterval init_interval)
+    // The returned ID is an owning reference (ownership count given by added_refcnt).
+    [[nodiscard]] nodepool::id<VisRecordListNode> memoize_new_vis_record(SigthreadInterval init_interval,
+                                                                         uint32_t added_refcnt)
     {
         assert(init_interval.tid_hi > init_interval.tid_lo);
         assert(init_interval.sigbits() != 0);
+        assert(added_refcnt != 0);
 
-        NewVisRecordCommand command{init_interval};
+        NewVisRecordCommand command{init_interval, added_refcnt};
         nodepool::id<VisRecordListNode> id = for_buckets<BucketProcessType::Insert>(init_interval, command);
         assert(id);
         assert(equal(const_resolve_forwarding(id), init_interval));
@@ -1049,21 +1059,16 @@ struct SyncEnv
         nodepool::id<VisRecordListNode> new_id;
 
         if (p_found_id) {
-            // Existing memoized entry found, forward to it.
-            VisRecordListNode& new_node = alloc_default_node(&new_id);
-            assert(!new_node.exospork_next_id);
-            new_node.refcnt = 1;
-
-            assert(*p_found_id);
-            new_node.exospork_next_id = *p_found_id;
-            incref(new_node.exospork_next_id);
-            assert(new_node.is_forwarded());
+            // Existing memoized entry found.
+            new_id = *p_found_id;
+            assert(new_id);
+            get(new_id).refcnt += command.added_refcnt;
         }
         else {
             // Add memoized base visibility set entry to bucket of memoization table.
             new_id = alloc_visibility_record(command.init_interval);
             assert(!get(new_id).exospork_next_id);
-            assert(get(new_id).refcnt == 1);
+            get(new_id).refcnt = command.added_refcnt;
             assert(!get(new_id).is_forwarded());
             insert_next_node(p_bucket_head, new_id);
         }
@@ -1209,6 +1214,8 @@ struct SyncEnv
     template <typename Command>
     void update_vis_records_for_sync_impl(const Command& command)
     {
+        ++sync_counter;
+
         // Only visibility sets that intersect the first visibility set (V1) can be updated by this sync.
         // This is even the case for Await, assuming the V1 for the corresponding Arrive was correctly given.
         const SigthreadInterval minimal_superset = command.V1;
@@ -1298,6 +1305,12 @@ struct SyncEnv
     template <bool IsWrite>
     void on_access_impl(size_t N, AssignmentRecord* p_assignment_records, SigthreadInterval accessor_set)
     {
+        // We will memoize the new visibility record once
+        if (N == 0) {
+            return;
+        }
+        nodepool::id<VisRecordListNode> vis_record_id = memoize_new_vis_record(accessor_set, uint32_t(N));
+
         for (size_t i = 0; i < N; ++i) {
             AssignmentRecord& assignment_record = p_assignment_records[i];
 
@@ -1319,8 +1332,6 @@ struct SyncEnv
             }
 
             // Add new visibility record (either as new write visibility record, or appended read visibility record).
-            // TODO we could make this cheaper by lifting out of this for loop; need to be careful about ref counts.
-            nodepool::id<VisRecordListNode> vis_record_id = memoize_new_vis_record(accessor_set);
 
             if constexpr (IsWrite) {
                 // Clear out assignment record on write and add the single write visibility record.
@@ -1328,6 +1339,7 @@ struct SyncEnv
                 assignment_record.write_vis_record_id = vis_record_id;
                 assignment_record.assignment_id = ++assignment_counter;
                 assert(assignment_record.assignment_id != 0);
+                assignment_record.last_sync_counter_bits = sync_counter;
             }
             else {
                 // Add the new visibility record to the list of read visibility records.
@@ -1336,32 +1348,16 @@ struct SyncEnv
                 read_node.vis_record_id = vis_record_id;
                 insert_next_node(&assignment_record.read_vis_records_head_id, read_id);
 
-                // XXX this is way too expensive.
-                //
-                // Remove duplicate read visibility records.
-                // Removing forwarding causes two equivalent read visibility records to have identical IDs
-                // (both referring to the shared entry in the memoizatiion table).
-                Set<nodepool::id<VisRecordListNode>> vis_record_id_set;
-                nodepool::id<ReadVisRecordListNode>* p_read_id = &assignment_record.read_vis_records_head_id;
-                while (nodepool::id<ReadVisRecordListNode> next_id = *p_read_id) {
-                    ReadVisRecordListNode& next_node = get(next_id);
-                    remove_forwarding(&next_node.vis_record_id);
-
-                    if (vis_record_id_set.count(next_node.vis_record_id)) {
-                        // Duplicate, remove next node from list (decrements refcount for duplicated vis record).
-                        // This causes (next_id = *p_read_id) to change, so we don't have to update p_read_id.
-                        // i.e. since we removed the next node, we're ready to process a new next node next iteration.
-                        nodepool::id<ReadVisRecordListNode> victim_id = remove_next_node(p_read_id);
-                        assert(victim_id == next_id);
-                        assert(next_node.exospork_next_id == 0);
-                        decref(next_node.vis_record_id);
-                        extend_free_list(victim_id);
-                    }
-                    else {
-                        // If next node survives, remember the visibility set ID and move on.
-                        vis_record_id_set.insert(next_node.vis_record_id);
-                        p_read_id = &get(next_id).exospork_next_id;
-                    }
+                // If we leave things as-is, read vis records may build up indefinitely for variables that are written
+                // once and read many times. We fix this by removing duplicates; however, this is really expensive,
+                // so we only do it once after each synchronization event (synchronization is when memoization kicks
+                // in to potentially allow us to recognize duplicates due to duplicated IDs).
+                const auto old_bits = assignment_record.last_sync_counter_bits;
+                assignment_record.last_sync_counter_bits = sync_counter;
+                if (old_bits != assignment_record.last_sync_counter_bits) {
+                    // This could fail if the bits of sync_counter overflow exactly.
+                    // However, this is unlikely, and is only a performance issue if so (we fail to remove duplicates).
+                    assignment_record_remove_duplicates(&assignment_record);
                 }
             }
         }
@@ -1381,6 +1377,45 @@ struct SyncEnv
     {
         for (size_t i = 0; i < N; ++i) {
             reset_assignment_record(p_assignment_records + i);
+        }
+    }
+
+    // Resolve forwarding and remove duplicate read visibility records.
+    // Removing forwarding causes two equivalent read visibility records to have identical IDs
+    // (both referring to the shared entry in the memoization table).
+    void assignment_record_remove_duplicates(AssignmentRecord* p_assignment_record)
+    {
+        using node_id = nodepool::id<ReadVisRecordListNode>;
+
+        // Clear out tmp_is_duplicate to 0.
+        for (node_id id = p_assignment_record->read_vis_records_head_id; id; ) {
+            const ReadVisRecordListNode node = get(id);
+            get(node.vis_record_id).base_data.tmp_is_duplicate = 0;
+            id = node.exospork_next_id;
+        }
+
+        // Remove duplicates, using remove_forwarding (unique ID iff unique record)
+        // and tmp_is_duplicate to recognize duplicates.
+        node_id* p_read_id = &p_assignment_record->read_vis_records_head_id;
+        while (node_id next_id = *p_read_id) {
+            ReadVisRecordListNode& next_node = get(next_id);
+            uint8_t& is_duplicate = remove_forwarding(&next_node.vis_record_id).tmp_is_duplicate;
+
+            if (is_duplicate) {
+                // Duplicate, remove next node from list (decrements refcount for duplicated vis record).
+                // This causes (next_id = *p_read_id) to change, so we don't have to update p_read_id.
+                // i.e. since we removed the next node, we're ready to process a new next node next iteration.
+                node_id victim_id = remove_next_node(p_read_id);
+                assert(victim_id == next_id);
+                assert(next_node.exospork_next_id == 0);
+                decref(next_node.vis_record_id);
+                extend_free_list(victim_id);
+            }
+            else {
+                // If next node survives, remember the visibility set ID and move on.
+                is_duplicate = 1;
+                p_read_id = &get(next_id).exospork_next_id;
+            }
         }
     }
 
