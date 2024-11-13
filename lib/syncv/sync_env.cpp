@@ -17,7 +17,9 @@
 
 // Maybe replace later
 #include <unordered_map>
+#include <unordered_set>
 template <typename K, typename V> using Map = std::unordered_map<K, V>;
+template <typename V> using Set = std::unordered_set<V>;
 
 namespace exospork
 {
@@ -64,13 +66,15 @@ struct VisRecord
     uint8_t tmp_is_duplicate;
 };
 
+using refcnt_t = uint32_t;
+
 struct VisRecordListNode
 {
     // Count of owning references.
     // AssignmentRecord references (and ReadVisRecordListNode) are owning.
     // Forwarding references are owning.
     // Memoization table references are non-owning.
-    uint32_t refcnt;
+    refcnt_t refcnt;
 
     // If in base state, this is the next node in the memoization bucket
     // If in the forwarding state, this is an owning reference to the
@@ -382,6 +386,15 @@ struct SyncEnv
         return sz;
     }
 
+    template <typename ListNode>
+    Set<nodepool::id<ListNode>> debug_free_node_ids() const
+    {
+        Set<nodepool::id<ListNode>> id_set;
+        using TypedPool = nodepool::Pool<ListNode>;
+        std::get<TypedPool>(pool_tuple).get_free_ids(&id_set);
+        return id_set;
+    }
+
     // Increment reference count of visibility record.
     void incref(nodepool::id<VisRecordListNode> id) noexcept
     {
@@ -652,7 +665,7 @@ struct SyncEnv
     }
 
     // Check if visibility records are equal.
-    bool equal(const VisRecord& a, const VisRecord& b)
+    bool equal(const VisRecord& a, const VisRecord& b) const
     {
         static_assert(sizeof(a) == 12, "Update me");
 
@@ -813,6 +826,9 @@ struct SyncEnv
     void free_barrier(exospork_syncv_barrier_t* bar)
     {
         const auto barrier_id = get_barrier_id(bar);
+        const BarrierState& state = barrier_states[barrier_id];
+        assert(state.arrive_count == state.await_count);  // TODO should not be assert
+
         uint64_t& word = live_barrier_bits[barrier_id / 64u];
         const uint64_t bit = uint64_t(1) << (barrier_id & 63u);
         assert((word & bit));  // Barrier ID was not allocated
@@ -1157,6 +1173,36 @@ struct SyncEnv
         nodepool::id<VisRecordListNode>* p_id = bucket_search(p_bucket_head, lambda);
         if (p_id) {
             return remove_next_node(p_id);
+        }
+        else {
+            return {};
+        }
+    }
+
+    struct FindMemoizedCommand
+    {
+        const VisRecordListNode* p_node;
+    };
+
+    nodepool::id<VisRecordListNode> find_memoized(const VisRecordListNode* p_node) const noexcept
+    {
+        assert(p_node);
+        assert(!p_node->is_forwarded());
+
+        FindMemoizedCommand command{p_node};
+        auto bucket_key = minimal_superset_interval(p_node->base_data.visibility_set);
+        return const_cast<SyncEnv*>(this)->for_buckets<BucketProcessType::Find>(bucket_key, command);
+    }
+
+    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head,
+                                                   FindMemoizedCommand command) noexcept
+    {
+        auto lambda = [this, command] (const VisRecord& record) {
+            return equal(record, command.p_node->base_data);
+        };
+        nodepool::id<VisRecordListNode>* p_id = bucket_search(p_bucket_head, lambda);
+        if (p_id) {
+            return *p_id;
         }
         else {
             return {};
@@ -1612,9 +1658,179 @@ struct SyncEnv
         debug_registered_assignment_records.erase(it);
     }
 
-    void validate_state() const
+    // Massive function that verifies that the current state is legal.
+    // This only works if all of the user's arrays of exospork_syncv_value_t have been debug registered,
+    // which otherwise is not needed for correct operation of the SyncEnv.
+    void debug_validate_state() const
     {
-        // TODO
+        std::vector<refcnt_t> read_refcnts(debug_node_pool_size<ReadVisRecordListNode>());
+        std::vector<refcnt_t> vis_refcnts(debug_node_pool_size<VisRecordListNode>());
+        std::vector<refcnt_t> sigthread_refcnts(debug_node_pool_size<SigthreadIntervalListNode>());
+        std::vector<refcnt_t> await_refcnts(debug_node_pool_size<PendingAwaitListNode>());
+
+        const auto free_read_ids = debug_free_node_ids<ReadVisRecordListNode>();
+        const auto free_vis_ids = debug_free_node_ids<VisRecordListNode>();
+        const auto free_sigthread_ids = debug_free_node_ids<SigthreadIntervalListNode>();
+        const auto free_await_ids = debug_free_node_ids<PendingAwaitListNode>();
+
+        auto record_owning = [] (std::vector<refcnt_t>* p_refcnts, auto id)
+        {
+            if (id) {
+                assert(id._1_index <= p_refcnts->size());
+                p_refcnts->at(id._1_index - 1)++;
+            }
+        };
+
+        // Count ownership references from AssignmentRecord to ReadVisRecordListNode, VisRecordListNode.
+        for (const auto& array_length_pair : debug_registered_assignment_records) {
+            AssignmentRecord* ptr = array_length_pair.first;
+            size_t sz = array_length_pair.second;
+
+            for (size_t i = 0; i < sz; ++i) {
+                const AssignmentRecord& record = ptr[i];
+                record_owning(&vis_refcnts, record.write_vis_record_id);
+
+                nodepool::id<ReadVisRecordListNode> read_id = record.read_vis_records_head_id;
+                while (read_id) {
+                    const ReadVisRecordListNode& read_node = get(read_id);
+                    assert(read_node.vis_record_id);
+                    record_owning(&read_refcnts, read_id);
+                    record_owning(&vis_refcnts, read_node.vis_record_id);
+                    read_id = read_node.exospork_next_id;
+                }
+            }
+        }
+
+        // Count ownership references from live VisRecordListNode objects to other objects:
+        //   * SigthreadIntervalListNode
+        //   * PendingAwaitListNode
+        //   * forwarded-to VisRecordListNodes
+        // Furthermore we validate that the encoding for the visibility set is correct.
+        for (nodepool::id<VisRecordListNode> id{1}; id._1_index <= vis_refcnts.size(); ++id._1_index) {
+            if (free_vis_ids.count(id)) {
+                continue;  // Ignore non-allocated VisRecordListNode.
+            }
+            const VisRecordListNode& node = get(id);
+
+            if (node.is_forwarded()) {
+                assert(node.exospork_next_id);
+                record_owning(&vis_refcnts, node.exospork_next_id);
+            }
+            else {
+                for (nodepool::id<SigthreadIntervalListNode> node_id = node.base_data.visibility_set; node_id; ) {
+                    record_owning(&sigthread_refcnts, node_id);
+                    SigthreadIntervalListNode this_node = get(node_id);
+                    assert(this_node.data.tid_hi > this_node.data.tid_lo);
+                    assert(this_node.data.sigbits() != 0);
+
+                    auto next_id = this_node.exospork_next_id;
+                    if (next_id) {
+                        SigthreadIntervalListNode next_node = get(next_id);
+                        assert(valid_adjacent(this_node.data, next_node.data));
+                        node_id = next_id;
+                    }
+                    else {
+                        break;
+                    }
+                }
+
+                for (nodepool::id<PendingAwaitListNode> node_id = node.base_data.pending_await_list; node_id; ) {
+                    record_owning(&await_refcnts, node_id);
+                    PendingAwaitListNode node = get(node_id);
+                    node_id = node.exospork_next_id;
+                }
+            }
+        }
+
+        // Check that reference counts are correct.
+        // For all node types except VisRecordListNode, the refcnt should just be 0 or 1 (unique ownership).
+        for (nodepool::id<ReadVisRecordListNode> id{1}; id._1_index <= read_refcnts.size(); ++id._1_index) {
+            const refcnt_t debug_refcnt = read_refcnts[id._1_index - 1];
+            assert(debug_refcnt == (free_read_ids.count(id) ? 0u : 1u));
+        }
+        for (nodepool::id<SigthreadIntervalListNode> id{1}; id._1_index <= sigthread_refcnts.size(); ++id._1_index) {
+            const refcnt_t debug_refcnt = sigthread_refcnts[id._1_index - 1];
+            assert(debug_refcnt == (free_sigthread_ids.count(id) ? 0u : 1u));
+        }
+        for (nodepool::id<PendingAwaitListNode> id{1}; id._1_index <= await_refcnts.size(); ++id._1_index) {
+            const refcnt_t debug_refcnt = await_refcnts[id._1_index - 1];
+            assert(debug_refcnt == (free_await_ids.count(id) ? 0u : 1u));
+        }
+        for (nodepool::id<VisRecordListNode> id{1}; id._1_index <= vis_refcnts.size(); ++id._1_index) {
+            const refcnt_t debug_refcnt = vis_refcnts[id._1_index - 1];
+            if (free_vis_ids.count(id)) {
+                assert(debug_refcnt == 0);
+            }
+            else {
+                assert(debug_refcnt == get(id).refcnt);
+            }
+        }
+
+
+        // Memoization Validation
+        // A VisRecord should be in the memoization table iff it's alive and in the base state.
+
+
+        // (VisRecord in memoization table => alive and in base state)
+        // We also check that no empty IntervalBucket(s) left behind (besides the top level bucket)
+        // and that the tree state is consistent (correct back pointer to parent, correct non-empty child counts).
+        auto validate_bucket_linked_list = [this] (nodepool::id<VisRecordListNode> id)
+        {
+            while (id) {
+                const VisRecordListNode& node = get(id);
+                assert(node.refcnt != 0);
+                assert(!node.is_forwarded());
+                id = node.exospork_next_id;
+            }
+        };
+
+        auto validate_child_buckets = [this, validate_bucket_linked_list] (const auto& bucket, auto validate)
+        {
+            // Should always be 0 outside for_buckets<...>(...) otherwise the bucket is immortal.
+            assert(bucket.visitor_count == 0);
+            uint32_t real_nonempty_child_count = 0;
+
+            for (uint32_t child_index = 0; child_index < bucket.child_count; ++child_index) {
+                const auto& child_bucket_id_or_ptr = bucket.child_interval_buckets[child_index];
+                real_nonempty_child_count += child_bucket_id_or_ptr ? 1u : 0u;
+                if constexpr (bucket.bucket_level != 1) {
+                    if (child_bucket_id_or_ptr) {
+                        IntervalBucket<bucket.bucket_level - 1>& child_bucket = *child_bucket_id_or_ptr;
+                        assert(child_bucket.p_parent == &bucket);
+                        assert(child_bucket.child_index_in_parent == child_index);
+                        assert(!interval_bucket_is_empty(child_bucket));
+                        validate(child_bucket, validate);
+                    }
+                }
+                else {
+                    // Level 1 bucket holds level 0 buckets directly (rather than with an extra wrapper
+                    // IntervalBucket<0> structure).
+                    validate_bucket_linked_list(child_bucket_id_or_ptr);
+                }
+            }
+
+            assert(bucket.nonempty_child_count == real_nonempty_child_count);
+            validate_bucket_linked_list(bucket.bucket);
+        };
+        validate_child_buckets(top_level_bucket, validate_child_buckets);
+        validate_bucket_linked_list(top_level_bucket.bucket);
+
+
+        // (VisRecord in memoization table <= alive and in base state)
+        // Each VisRecord should be able to find itself in the table; if we fail, it could be because we
+        // forgot to memoize it, or something is wrong with the bucket search or equality function.
+        for (nodepool::id<VisRecordListNode> id{1}; id._1_index <= vis_refcnts.size(); ++id._1_index) {
+            const bool live = vis_refcnts[id._1_index - 1] != 0;
+            if (!live) {
+                continue;
+            }
+            const auto& node = get(id);
+            if (node.is_forwarded()) {
+                continue;
+            }
+
+            assert(id == find_memoized(&node));
+        }
     }
 };
 
@@ -1638,7 +1854,7 @@ catch (...) { \
     throw; \
 } \
 if (p_env->operation_counter == p_env->debug_operation_id) { \
-    p_env->validate_state(); \
+    p_env->debug_validate_state(); \
 }
 
 SyncEnv* new_sync_env(const exospork_syncv_init_t& init)
@@ -1726,8 +1942,6 @@ void end_no_checking(SyncEnv* p_env)
     p_env->no_checking_counter--;
 }
 
-// TODO arrive/await/barrier
-
 
 
 // *** Debug Inspection Interface ***
@@ -1758,6 +1972,11 @@ void debug_get_read_vis_record_ids(const SyncEnv* p_env, const exospork_syncv_va
 void debug_get_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out)
 {
     p_env->debug_get_vis_record_data(id, out);
+}
+
+void debug_validate_state(SyncEnv* p_env)
+{
+    p_env->debug_validate_state();
 }
 
 }  // end namespace

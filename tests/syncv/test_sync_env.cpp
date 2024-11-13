@@ -41,10 +41,16 @@ void test_sync_env()
             on_fence(p_env, V1, V2, true);
         }
 
+        debug_validate_state(p_env);
+
         for (uint32_t tid = 0; tid < 32 * warp_count; ++tid) {
             exospork::SigthreadInterval accessor_set{tid, tid+1, sig_generic | EXOSPORK_SYNC_ACCESS_BIT};
             for (uint32_t i = 0; i < 32 * warp_count; ++i) {
                 on_r(p_env, 1, &values[i], accessor_set);
+            }
+
+            if (tid > 3 && tid < 33) {
+                debug_validate_state(p_env);
             }
         }
 
@@ -53,11 +59,15 @@ void test_sync_env()
             on_fence(p_env, V, V, true);
         }
 
+        debug_validate_state(p_env);
+
         // This should fail if the above barrier is skipped (WAR)
         for (uint32_t tid = 0; tid < 32 * warp_count; ++tid) {
             exospork::SigthreadInterval accessor_set{tid, tid+1, sig_generic | EXOSPORK_SYNC_ACCESS_BIT};
             on_rw(p_env, 1, &values[tid], accessor_set);
         }
+
+        debug_validate_state(p_env);
     }
 
     if (true) {
@@ -69,23 +79,31 @@ void test_sync_env()
     exospork_syncv_barrier_t bar{};
     alloc_barrier(p_env, &bar);
 
+    debug_validate_state(p_env);
+
     // Producer
     {
         exospork::SigthreadInterval V1{0, 32, sig_async};
         // on_rw(p_env, 32, &values[0], V1);
         on_rw(p_env, 32, &values[0], V1);
         on_arrive(p_env, &bar, V1, false);
+        debug_validate_state(p_env);
     }
 
     // Consumer
     {
+        debug_validate_state(p_env);
         exospork::SigthreadInterval V2{32, 64, sig_generic | EXOSPORK_SYNC_ACCESS_BIT};
         on_await(p_env, &bar, V2);
+        debug_validate_state(p_env);
         on_r(p_env, 32, &values[0], V2);
         on_rw(p_env, 32, &values[0], V2);
+        debug_validate_state(p_env);
     }
+
 
     free_barrier(p_env, &bar);
     clear_values(p_env, 32 * warp_count, values);
+    debug_validate_state(p_env);
     debug_unregister_values(p_env, 32 * warp_count, values);
 }
