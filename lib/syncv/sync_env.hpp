@@ -59,6 +59,8 @@ void on_r(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInt
 void on_rw(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set);
 void clear_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values);
 void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2, bool transitive);
+void begin_no_checking(SyncEnv* p_env);
+void end_no_checking(SyncEnv* p_env);
 
 
 

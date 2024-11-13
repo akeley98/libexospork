@@ -279,6 +279,9 @@ struct SyncEnv
     // Ignore all further SyncEnv commands if failed = true.
     bool failed = false;
 
+    // Number of times begin_no_checking was called minus end_no_checking.
+    uint32_t no_checking_counter = 0;
+
     // Counters for operations
     uint64_t assignment_counter = 0;  // Write counter
     uint64_t sync_counter = 0;        // Sync operation counter
@@ -1304,7 +1307,7 @@ struct SyncEnv
 
 
     template <bool IsWrite>
-    void on_access_impl(size_t N, AssignmentRecord* p_assignment_records, SigthreadInterval accessor_set)
+    void checked_on_access_impl(size_t N, AssignmentRecord* p_assignment_records, SigthreadInterval accessor_set)
     {
         // We will memoize the new visibility record once
         if (N == 0) {
@@ -1338,7 +1341,7 @@ struct SyncEnv
                 // Clear out assignment record on write and add the single write visibility record.
                 reset_assignment_record(&assignment_record);
                 assignment_record.write_vis_record_id = vis_record_id;
-                assignment_record.assignment_id = ++assignment_counter;
+                assignment_record.assignment_id = assignment_counter;
                 assert(assignment_record.assignment_id != 0);
                 assignment_record.last_sync_counter_bits = sync_counter;
             }
@@ -1366,12 +1369,20 @@ struct SyncEnv
 
     void on_r(size_t N, AssignmentRecord* p_assignment_records, SigthreadInterval accessor_set)
     {
-        on_access_impl<false>(N, p_assignment_records, accessor_set);
+        if (no_checking_counter == 0) {
+            checked_on_access_impl<false>(N, p_assignment_records, accessor_set);
+        }
     }
 
     void on_rw(size_t N, AssignmentRecord* p_assignment_records, SigthreadInterval accessor_set)
     {
-        on_access_impl<true>(N, p_assignment_records, accessor_set);
+        assignment_counter++;
+        if (no_checking_counter == 0) {
+            checked_on_access_impl<true>(N, p_assignment_records, accessor_set);
+        }
+        else {
+            clear_values(N, p_assignment_records);
+        }
     }
 
     void clear_values(size_t N, AssignmentRecord* p_assignment_records)
@@ -1548,6 +1559,17 @@ void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2, bool t
     INTERFACE_PROLOGUE(p_env)
     p_env->update_vis_records_for_fence(V1, V2, transitive);
     INTERFACE_EPILOGUE(p_env)
+}
+
+void begin_no_checking(SyncEnv* p_env)
+{
+    p_env->no_checking_counter++;
+}
+
+void end_no_checking(SyncEnv* p_env)
+{
+    assert(p_env->no_checking_counter);
+    p_env->no_checking_counter--;
 }
 
 // TODO arrive/await/barrier

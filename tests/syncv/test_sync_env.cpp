@@ -35,7 +35,7 @@ void test_sync_env()
 
     for (int i = 0; i < 3; ++i) {
         // Simple barrier
-        {
+        if (true) {
             exospork::SigthreadInterval V1{0, warp_count * 32, sig_generic};
             exospork::SigthreadInterval V2{0, warp_count * 32, sig_generic};
             on_fence(p_env, V1, V2, true);
