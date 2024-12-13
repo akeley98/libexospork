@@ -106,7 +106,7 @@ struct ReadVisRecordListNode
 // i.e. the user should have parallel arrays of AssignmentRecord and program variable values.
 struct AssignmentRecord
 {
-    // Single write visibility record (always exists)
+    // Single write visibility record (or 0, if no recorded write has occured yet).
     nodepool::id<VisRecordListNode> write_vis_record_id;
 
     // Zero or more read visibility records.
@@ -901,6 +901,7 @@ struct SyncEnv
 
     // Like remove_forwarding but non-destructive, i.e., don't actually replace the ID of a forwarding visibility
     // record with that of the forwarded-to base visibility record.
+    // NB could easily modify this to return the ID as well, but not needed for now.
     VisRecord const_resolve_forwarding(nodepool::id<VisRecordListNode> id) const noexcept
     {
         assert(id);
