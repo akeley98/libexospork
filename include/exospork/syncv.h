@@ -27,7 +27,13 @@ struct exospork_syncv_init_t
 // array of values in the program.
 struct exospork_syncv_value_t
 {
-    uint64_t data_0, data_1;
+    uint32_t node_id;
+#ifdef __cplusplus
+    operator bool() const
+    {
+        return node_id != 0;
+    }
+#endif
 };
 
 // Opaque value for each barrier.

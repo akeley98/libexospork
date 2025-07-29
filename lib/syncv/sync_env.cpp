@@ -102,15 +102,18 @@ struct ReadVisRecordListNode
 };
 
 // Assignment record: 1 write visibility record + collection of read visibility records.
-// This is associated for each variable of the program undergoing synchronization validation.
-// i.e. the user should have parallel arrays of AssignmentRecord and program variable values.
+// This is associated for each position (scalar, or value in a tensor)
+// of the program undergoing synchronization validation.
 struct AssignmentRecord
 {
+    nodepool::id<AssignmentRecord> exospork_next_id{0};
+    refcnt_t refcnt = 0;
+
     // Single write visibility record (or 0, if no recorded write has occured yet).
-    nodepool::id<VisRecordListNode> write_vis_record_id;
+    nodepool::id<VisRecordListNode> write_vis_record_id{0};
 
     // Zero or more read visibility records.
-    nodepool::id<ReadVisRecordListNode> read_vis_records_head_id;
+    nodepool::id<ReadVisRecordListNode> read_vis_records_head_id{0};
 
     // Unique ID for this assignment
     uint64_t assignment_id : 52;
@@ -118,18 +121,6 @@ struct AssignmentRecord
     // See assignment_record_remove_duplicates.
     uint64_t last_augment_counter_bits : 12;
 };
-
-static_assert(sizeof(AssignmentRecord) == sizeof(exospork_syncv_value_t));
-
-inline AssignmentRecord* from_api(exospork_syncv_value_t* p)
-{
-    return reinterpret_cast<AssignmentRecord*>(p);
-}
-
-inline const AssignmentRecord* from_api(const exospork_syncv_value_t* p)
-{
-    return reinterpret_cast<const AssignmentRecord*>(p);
-}
 
 struct BarrierState
 {
@@ -288,6 +279,7 @@ struct SyncEnv
     uintptr_t original_memory_budget = 0;
     uintptr_t current_memory_budget = 0;
     std::tuple<
+        nodepool::Pool<AssignmentRecord>,
         nodepool::Pool<SigthreadIntervalListNode>,
         nodepool::Pool<PendingAwaitListNode>,
         nodepool::Pool<VisRecordListNode>,
@@ -302,10 +294,10 @@ struct SyncEnv
     IntervalBucket<bucket_level_count - 1> top_level_bucket;
 
     // Debugging/Testing
-    // Record pointers to registered AssignmentRecord arrays (plus the array sizes).
+    // Record pointers to registered exospork_syncv_value_t arrays (plus the array sizes).
     // Ordinarily we rely on the user alone to remember these arrays, but we need to cache them if we are
     // doing consistency checks.
-    Map<AssignmentRecord*, size_t> debug_registered_assignment_records;
+    Map<exospork_syncv_value_t*, size_t> debug_registered_assignment_records;
 
     uint64_t debug_assignment_id = 0;
     uint64_t debug_operation_id = 0;
@@ -393,6 +385,32 @@ struct SyncEnv
         return id_set;
     }
 
+    // Increment reference count of assignment record
+    void incref(nodepool::id<AssignmentRecord> id) noexcept
+    {
+        AssignmentRecord& node = get(id);
+        assert(node.refcnt != 0);
+        node.refcnt++;
+        assert(node.refcnt != 0);  // Overflow check
+    }
+
+    // Decrement reference count of assignment record.
+    void decref(nodepool::id<AssignmentRecord> id) noexcept
+    {
+        nodepool::id<AssignmentRecord> next{0};
+        assert(id);
+        AssignmentRecord& node = get(id);
+        if (0 == --node.refcnt) {
+            reset_assignment_record(&node);
+            next = node.exospork_next_id;
+            node.exospork_next_id._1_index = 0;
+            extend_free_list(id);
+        }
+        if (next) {
+            decref(next);
+        }
+    }
+
     // Increment reference count of visibility record.
     void incref(nodepool::id<VisRecordListNode> id) noexcept
     {
@@ -425,6 +443,19 @@ struct SyncEnv
                 free_single_vis_record(memoized_id);
             }
         }
+    }
+
+    AssignmentRecord& lazy_from_api(exospork_syncv_value_t* p_api_value)
+    {
+        nodepool::id<AssignmentRecord> node_id;
+        node_id._1_index = p_api_value->node_id;
+        if (!node_id) {
+            AssignmentRecord& node = alloc_default_node(&node_id);
+            node.refcnt = 1;
+            p_api_value->node_id = node_id._1_index;
+            return node;
+        }
+        return get(node_id);
     }
 
     void reset_vis_record_data(VisRecord* p_data) noexcept
@@ -1478,7 +1509,9 @@ struct SyncEnv
 
 
     template <bool IsWrite>
-    void checked_on_access_impl(size_t N, AssignmentRecord* p_assignment_records, SigthreadInterval accessor_set)
+    void checked_on_access_impl(size_t N,
+                                exospork_syncv_value_t* p_assignment_record_ids,
+                                SigthreadInterval accessor_set)
     {
         // We will memoize the new visibility record once
         if (N == 0) {
@@ -1487,7 +1520,7 @@ struct SyncEnv
         nodepool::id<VisRecordListNode> vis_record_id = memoize_new_vis_record(accessor_set, uint32_t(N));
 
         for (size_t i = 0; i < N; ++i) {
-            AssignmentRecord& assignment_record = p_assignment_records[i];
+            AssignmentRecord& assignment_record = lazy_from_api(p_assignment_record_ids + i);
 
             // Check against previous write visibility record
             if (assignment_record.write_vis_record_id) {
@@ -1538,28 +1571,32 @@ struct SyncEnv
         }
     }
 
-    void on_r(size_t N, AssignmentRecord* p_assignment_records, SigthreadInterval accessor_set)
+    void on_r(size_t N, exospork_syncv_value_t* p_assignment_record_ids, SigthreadInterval accessor_set)
     {
         if (no_checking_counter == 0) {
-            checked_on_access_impl<false>(N, p_assignment_records, accessor_set);
+            checked_on_access_impl<false>(N, p_assignment_record_ids, accessor_set);
         }
     }
 
-    void on_rw(size_t N, AssignmentRecord* p_assignment_records, SigthreadInterval accessor_set)
+    void on_rw(size_t N, exospork_syncv_value_t* p_assignment_record_ids, SigthreadInterval accessor_set)
     {
         assignment_counter++;
         if (no_checking_counter == 0) {
-            checked_on_access_impl<true>(N, p_assignment_records, accessor_set);
+            checked_on_access_impl<true>(N, p_assignment_record_ids, accessor_set);
         }
         else {
-            clear_values(N, p_assignment_records);
+            clear_values(N, p_assignment_record_ids);
         }
     }
 
-    void clear_values(size_t N, AssignmentRecord* p_assignment_records)
+    void clear_values(size_t N, exospork_syncv_value_t* p_assignment_record_ids)
     {
         for (size_t i = 0; i < N; ++i) {
-            reset_assignment_record(p_assignment_records + i);
+            nodepool::id<AssignmentRecord> id{p_assignment_record_ids[i].node_id};
+            if (id) {
+                decref(id);
+                p_assignment_record_ids[i].node_id = 0;
+            }
         }
     }
 
@@ -1643,13 +1680,13 @@ struct SyncEnv
         }
     }
 
-    void debug_register_values(size_t N, AssignmentRecord* values)
+    void debug_register_values(size_t N, exospork_syncv_value_t* values)
     {
         [[maybe_unused]] const bool unique = debug_registered_assignment_records.insert({values, N}).second;
         assert(unique);
     }
 
-    void debug_unregister_values(size_t N, AssignmentRecord* values)
+    void debug_unregister_values(size_t N, exospork_syncv_value_t* values)
     {
         auto it = debug_registered_assignment_records.find(values);
         assert(it != debug_registered_assignment_records.end());
@@ -1666,37 +1703,52 @@ struct SyncEnv
         std::vector<refcnt_t> vis_refcnts(debug_node_pool_size<VisRecordListNode>());
         std::vector<refcnt_t> sigthread_refcnts(debug_node_pool_size<SigthreadIntervalListNode>());
         std::vector<refcnt_t> await_refcnts(debug_node_pool_size<PendingAwaitListNode>());
+        std::vector<refcnt_t> assignment_refcnts(debug_node_pool_size<AssignmentRecord>());
 
         const auto free_read_ids = debug_free_node_ids<ReadVisRecordListNode>();
         const auto free_vis_ids = debug_free_node_ids<VisRecordListNode>();
         const auto free_sigthread_ids = debug_free_node_ids<SigthreadIntervalListNode>();
         const auto free_await_ids = debug_free_node_ids<PendingAwaitListNode>();
 
-        auto record_owning = [] (std::vector<refcnt_t>* p_refcnts, auto id)
+        auto record_owning = [] (std::vector<refcnt_t>* p_refcnts, auto id) -> bool  // First time flag
         {
             if (id) {
                 assert(id._1_index <= p_refcnts->size());
-                p_refcnts->at(id._1_index - 1)++;
+                auto refcnt_before = p_refcnts->at(id._1_index - 1)++;
+                return refcnt_before == 0;
             }
+            return false;
         };
 
-        // Count ownership references from AssignmentRecord to ReadVisRecordListNode, VisRecordListNode.
+        auto process_assignment_record = [&] (nodepool::id<AssignmentRecord> id, auto recurse)
+        {
+            const bool first_time = record_owning(&assignment_refcnts, id);
+            if (!first_time) {
+                return;
+            }
+            const AssignmentRecord& record = get(id);
+            record_owning(&vis_refcnts, record.write_vis_record_id);
+
+            nodepool::id<ReadVisRecordListNode> read_id = record.read_vis_records_head_id;
+            while (read_id) {
+                const ReadVisRecordListNode& read_node = get(read_id);
+                assert(read_node.vis_record_id);
+                record_owning(&read_refcnts, read_id);
+                record_owning(&vis_refcnts, read_node.vis_record_id);
+                read_id = read_node.exospork_next_id;
+            }
+            recurse(record.exospork_next_id, recurse);
+        };
+
+        // Count ownership references of AssignmentRecord.
+        // Further count ownership references from AssignmentRecord to ReadVisRecordListNode, VisRecordListNode.
         for (const auto& array_length_pair : debug_registered_assignment_records) {
-            AssignmentRecord* ptr = array_length_pair.first;
+            exospork_syncv_value_t* ptr = array_length_pair.first;
             size_t sz = array_length_pair.second;
 
             for (size_t i = 0; i < sz; ++i) {
-                const AssignmentRecord& record = ptr[i];
-                record_owning(&vis_refcnts, record.write_vis_record_id);
-
-                nodepool::id<ReadVisRecordListNode> read_id = record.read_vis_records_head_id;
-                while (read_id) {
-                    const ReadVisRecordListNode& read_node = get(read_id);
-                    assert(read_node.vis_record_id);
-                    record_owning(&read_refcnts, read_id);
-                    record_owning(&vis_refcnts, read_node.vis_record_id);
-                    read_id = read_node.exospork_next_id;
-                }
+                nodepool::id<AssignmentRecord> id{ptr[i].node_id};
+                process_assignment_record(id, process_assignment_record);
             }
         }
 
@@ -1742,7 +1794,11 @@ struct SyncEnv
         }
 
         // Check that reference counts are correct.
-        // For all node types except VisRecordListNode, the refcnt should just be 0 or 1 (unique ownership).
+        // For node types without refcnt, the refcnt should just be 0 or 1 (unique ownership).
+        for (nodepool::id<AssignmentRecord> id{1}; id._1_index <= assignment_refcnts.size(); ++id._1_index) {
+            const refcnt_t debug_refcnt = assignment_refcnts[id._1_index - 1];
+            assert(debug_refcnt == get(id).refcnt);
+        }
         for (nodepool::id<ReadVisRecordListNode> id{1}; id._1_index <= read_refcnts.size(); ++id._1_index) {
             const refcnt_t debug_refcnt = read_refcnts[id._1_index - 1];
             assert(debug_refcnt == (free_read_ids.count(id) ? 0u : 1u));
@@ -1878,21 +1934,21 @@ void delete_sync_env(SyncEnv* p_env)
 void on_r(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set)
 {
     INTERFACE_PROLOGUE(p_env)
-    p_env->on_r(N, from_api(values), accessor_set);
+    p_env->on_r(N, values, accessor_set);
     INTERFACE_EPILOGUE(p_env)
 }
 
 void on_rw(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set)
 {
     INTERFACE_PROLOGUE(p_env)
-    p_env->on_rw(N, from_api(values), accessor_set);
+    p_env->on_rw(N, values, accessor_set);
     INTERFACE_EPILOGUE(p_env)
 }
 
 void clear_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values)
 {
     INTERFACE_PROLOGUE(p_env)
-    p_env->clear_values(N, from_api(values));
+    p_env->clear_values(N, values);
     INTERFACE_EPILOGUE(p_env)
 }
 
@@ -1950,23 +2006,12 @@ void end_no_checking(SyncEnv* p_env)
 
 void debug_register_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values)
 {
-    p_env->debug_register_values(N, from_api(values));
+    p_env->debug_register_values(N, values);
 }
 
 void debug_unregister_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values)
 {
-    p_env->debug_unregister_values(N, from_api(values));
-}
-
-uint32_t debug_get_write_vis_record_id(const exospork_syncv_value_t* p_assignment_record)
-{
-    return from_api(p_assignment_record)->write_vis_record_id._1_index;
-}
-
-void debug_get_read_vis_record_ids(const SyncEnv* p_env, const exospork_syncv_value_t* p_assignment_record,
-                                   std::vector<uint32_t>* out)
-{
-    p_env->debug_get_read_vis_record_ids(*from_api(p_assignment_record), out);
+    p_env->debug_unregister_values(N, values);
 }
 
 void debug_get_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out)

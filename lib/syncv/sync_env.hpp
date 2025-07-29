@@ -72,9 +72,6 @@ void end_no_checking(SyncEnv* p_env);
 // *** Debug Inspection Interface ***
 void debug_register_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values);
 void debug_unregister_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values);
-uint32_t debug_get_write_vis_record_id(const exospork_syncv_value_t* p_assignment_record);
-void debug_get_read_vis_record_ids(const SyncEnv* p_env, const exospork_syncv_value_t* p_assignment_record,
-                                   std::vector<uint32_t>* out);
 void debug_get_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out);
 void debug_validate_state(SyncEnv* p_env);
 
