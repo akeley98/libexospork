@@ -18,6 +18,8 @@ namespace nodepool
 template <typename ListNode>
 struct id
 {
+    using value_type = ListNode;
+
     uint32_t _1_index;
 
     operator bool() const

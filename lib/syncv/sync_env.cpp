@@ -27,10 +27,17 @@ namespace exospork
 namespace
 {
 
+using refcnt_t = uint32_t;
+
 struct PendingAwaitListNode
 {
     pending_await_t await_id;
     nodepool::id<PendingAwaitListNode> exospork_next_id;
+
+    refcnt_t get_refcnt() const
+    {
+        return 1;  // Replace if refcnt member added;
+    }
 };
 
 // We encode a visibility set as a list of sorted, minimal
@@ -47,6 +54,11 @@ struct SigthreadIntervalListNode
 {
     SigthreadInterval data;
     nodepool::id<SigthreadIntervalListNode> exospork_next_id;
+
+    refcnt_t get_refcnt() const
+    {
+        return 1;  // Replace if refcnt member added
+    }
 };
 
 static_assert(sizeof(SigthreadIntervalListNode) == 16, "Check that you meant to change this perf-critical struct");
@@ -62,24 +74,24 @@ struct VisRecord
     uint8_t original_actor_signature;
 
     // This has nothing to do with the main purpose of the struct; only needed for assignment_record_remove_duplicates.
-    // This should be in VisRecordListNode conceptually, but that would waste 4 bytes.
+    // This should be in AssignmentRecordVisNode conceptually, but that would waste 4 bytes.
     uint8_t tmp_is_duplicate;
 };
 
-using refcnt_t = uint32_t;
-
+template <bool IsMutate>
 struct VisRecordListNode
 {
+    static constexpr bool is_mutate = IsMutate;
+
     // Count of owning references.
-    // AssignmentRecord references (and ReadVisRecordListNode) are owning.
+    // AssignmentRecord references (and AssignmentRecordVisNode) are owning.
     // Forwarding references are owning.
     // Memoization table references are non-owning.
     refcnt_t refcnt;
 
-    // If in base state, this is the next node in the memoization bucket
-    // If in the forwarding state, this is an owning reference to the
-    // forwarded-to visibility record.
-    nodepool::id<VisRecordListNode> exospork_next_id;
+    // If in base state, this is the next node in the memoization bucket.
+    // If in the forwarding state, this is an owning reference to the forwarded-to visibility record.
+    nodepool::id<VisRecordListNode<IsMutate>> exospork_next_id;
 
     // If the visibility record is in the base state, this is the valid data.
     // If the visibility record is in the forwarding state, the data is that of the record at get(exospork_next_id).
@@ -91,15 +103,36 @@ struct VisRecordListNode
     {
         return base_data.visibility_set._1_index == 0;
     }
+
+    refcnt_t get_refcnt() const
+    {
+        return refcnt;
+    }
 };
 
-static_assert(sizeof(VisRecordListNode) == 20, "Check that you meant to change this perf-critical struct");
+using ReadVisRecordListNode = VisRecordListNode<false>;
+using MutateVisRecordListNode = VisRecordListNode<true>;
 
-struct ReadVisRecordListNode
+static_assert(sizeof(ReadVisRecordListNode) == 20, "Check that you meant to change this perf-critical struct");
+
+template <bool IsMutate>
+struct AssignmentRecordVisNode
 {
-    nodepool::id<VisRecordListNode> vis_record_id;
-    nodepool::id<ReadVisRecordListNode> exospork_next_id;
+    // Linked list of read/mutate vis records for an assignment record.
+    // Don't use the exospork_next_id in the VisRecord itself ... that is for the memoization table's usage.
+    nodepool::id<VisRecordListNode<IsMutate>> vis_record_id;
+    nodepool::id<AssignmentRecordVisNode<IsMutate>> exospork_next_id;
+
+    static constexpr bool is_mutate = IsMutate;
+
+    refcnt_t get_refcnt() const
+    {
+        return 1;  // Replace if refcnt member added
+    }
 };
+
+using AssignmentRecordReadNode = AssignmentRecordVisNode<false>;
+using AssignmentRecordMutateNode = AssignmentRecordVisNode<true>;
 
 // Assignment record: 1 write visibility record + collection of read visibility records.
 // This is associated for each position (scalar, or value in a tensor)
@@ -109,17 +142,22 @@ struct AssignmentRecord
     nodepool::id<AssignmentRecord> exospork_next_id{0};
     refcnt_t refcnt = 0;
 
-    // Single write visibility record (or 0, if no recorded write has occured yet).
-    nodepool::id<VisRecordListNode> write_vis_record_id{0};
+    // TODO update this
+    nodepool::id<MutateVisRecordListNode> write_vis_record_id{0};
 
     // Zero or more read visibility records.
-    nodepool::id<ReadVisRecordListNode> read_vis_records_head_id{0};
+    nodepool::id<AssignmentRecordReadNode> read_vis_records_head_id{0};
 
     // Unique ID for this assignment
     uint64_t assignment_id : 52;
 
     // See assignment_record_remove_duplicates.
     uint64_t last_augment_counter_bits : 12;
+
+    refcnt_t get_refcnt() const
+    {
+        return refcnt;
+    }
 };
 
 struct BarrierState
@@ -143,18 +181,18 @@ template<> constexpr uint64_t bucket_level_size<8> = 0x400'0000;
 template<> constexpr uint64_t bucket_level_size<9> = 0x1'0000'0000;
 constexpr uint32_t bucket_level_count = 10;
 
-template <uint32_t BucketLevel> struct IntervalBucket;
+template <bool IsMutate, uint32_t BucketLevel> struct IntervalBucket;
 
-template <uint32_t BucketLevel>
+template <bool IsMutate, uint32_t BucketLevel>
 struct IntervalBucketParentPointer
 {
     static_assert(BucketLevel < bucket_level_count);
     uint32_t child_index_in_parent = 0;
-    IntervalBucket<BucketLevel + 1>* p_parent = nullptr;
+    IntervalBucket<IsMutate, BucketLevel + 1>* p_parent = nullptr;
 };
 
-template <>
-struct IntervalBucketParentPointer<bucket_level_count - 1>
+template <bool IsMutate>
+struct IntervalBucketParentPointer<IsMutate, bucket_level_count - 1>
 {
 };
 
@@ -174,8 +212,8 @@ struct IntervalBucketParentPointer<bucket_level_count - 1>
 //
 // Buckets should be removed from the tree when empty, see
 // delete_interval_bucket_if_empty.
-template <uint32_t BucketLevel>
-struct IntervalBucket : IntervalBucketParentPointer<BucketLevel>
+template <bool IsMutate, uint32_t BucketLevel>
+struct IntervalBucket : IntervalBucketParentPointer<IsMutate, BucketLevel>
 {
     static_assert(BucketLevel != 0, "BucketLevel = 0 for illustration only");
     static_assert(BucketLevel != 1, "Should be template specialization");
@@ -183,30 +221,30 @@ struct IntervalBucket : IntervalBucketParentPointer<BucketLevel>
 
     static constexpr uint32_t bucket_level = BucketLevel;
     static constexpr uint32_t child_count = bucket_level_size<BucketLevel> / bucket_level_size<BucketLevel - 1>;
-    std::unique_ptr<IntervalBucket<BucketLevel - 1>> child_interval_buckets[child_count];
+    std::unique_ptr<IntervalBucket<IsMutate, BucketLevel - 1>> child_interval_buckets[child_count];
 
     // Count of non-null pointers in child_interval_buckets.
     uint32_t nonempty_child_count = 0;
 
     // Bucket for this interval.
-    nodepool::id<VisRecordListNode> bucket = {0};
+    nodepool::id<VisRecordListNode<IsMutate>> bucket = {0};
 
     // For making code re-entrant (prevent de-allocation while being visited).
     uint32_t visitor_count = 0;
 };
 
-template <>
-struct IntervalBucket<1> : IntervalBucketParentPointer<1>
+template <bool IsMutate>
+struct IntervalBucket<IsMutate, 1> : IntervalBucketParentPointer<IsMutate, 1>
 {
     static constexpr uint32_t bucket_level = 1;
     static constexpr uint32_t child_count = bucket_level_size<1>;
-    nodepool::id<VisRecordListNode> child_interval_buckets[child_count] = {};
+    nodepool::id<VisRecordListNode<IsMutate>> child_interval_buckets[child_count] = {};
 
     // Count of non-null single_thread_buckets.
     uint32_t nonempty_child_count = 0;
 
     // Bucket for this interval.
-    nodepool::id<VisRecordListNode> bucket = {0};
+    nodepool::id<VisRecordListNode<IsMutate>> bucket = {0};
 
     // For making code re-entrant (prevent de-allocation while being visited).
     uint32_t visitor_count = 0;
@@ -218,8 +256,8 @@ struct IntervalBucket<1> : IntervalBucketParentPointer<1>
 // moving between buckets. e.g. bucket by lowest to highest sigbit count.
 
 
-template <uint32_t BucketLevel>
-bool interval_bucket_is_empty(const IntervalBucket<BucketLevel>& bucket) noexcept
+template <bool IsMutate, uint32_t BucketLevel>
+bool interval_bucket_is_empty(const IntervalBucket<IsMutate, BucketLevel>& bucket) noexcept
 {
     return bucket.nonempty_child_count == 0 && !bucket.bucket && !bucket.visitor_count;
 }
@@ -230,8 +268,8 @@ bool interval_bucket_is_empty(const IntervalBucket<BucketLevel>& bucket) noexcep
 // We do not make any modifications to the parent except for nulling out the pointer.
 // In particular, we don't change nonempty_child_count, or handle deleting the parent
 // if it too is now empty.
-template <uint32_t BucketLevel>
-void delete_interval_bucket_if_empty(IntervalBucket<BucketLevel>* p) noexcept
+template <bool IsMutate, uint32_t BucketLevel>
+void delete_interval_bucket_if_empty(IntervalBucket<IsMutate, BucketLevel>* p) noexcept
 {
     if (interval_bucket_is_empty(*p)) {
         for (const auto& child : p->child_interval_buckets) {
@@ -240,7 +278,7 @@ void delete_interval_bucket_if_empty(IntervalBucket<BucketLevel>* p) noexcept
 
         if constexpr (BucketLevel < bucket_level_count - 1) {
             // Parent pointer should be correct.
-            IntervalBucket<BucketLevel + 1>* p_parent = p->p_parent;
+            IntervalBucket<IsMutate, BucketLevel + 1>* p_parent = p->p_parent;
             assert(p_parent);
             const uint32_t child_index = p->child_index_in_parent;
             assert(child_index < p_parent->child_count);
@@ -282,8 +320,10 @@ struct SyncEnv
         nodepool::Pool<AssignmentRecord>,
         nodepool::Pool<SigthreadIntervalListNode>,
         nodepool::Pool<PendingAwaitListNode>,
-        nodepool::Pool<VisRecordListNode>,
-        nodepool::Pool<ReadVisRecordListNode>> pool_tuple;
+        nodepool::Pool<ReadVisRecordListNode>,
+        nodepool::Pool<MutateVisRecordListNode>,
+        nodepool::Pool<AssignmentRecordReadNode>,
+        nodepool::Pool<AssignmentRecordMutateNode>> pool_tuple;
 
     // Barrier state.
     // The Nth bit is 1 if N is allocated as a barrier ID.
@@ -291,7 +331,8 @@ struct SyncEnv
     BarrierState barrier_states[max_live_barriers];
 
     // Memoization table state.
-    IntervalBucket<bucket_level_count - 1> top_level_bucket;
+    IntervalBucket<false, bucket_level_count - 1> read_top_level_bucket;
+    IntervalBucket<true, bucket_level_count - 1> mutate_top_level_bucket;
 
     // Debugging/Testing
     // Record pointers to registered exospork_syncv_value_t arrays (plus the array sizes).
@@ -412,9 +453,10 @@ struct SyncEnv
     }
 
     // Increment reference count of visibility record.
-    void incref(nodepool::id<VisRecordListNode> id) noexcept
+    template <bool IsMutate>
+    void incref(nodepool::id<VisRecordListNode<IsMutate>> id) noexcept
     {
-        VisRecordListNode& node = get(id);
+        VisRecordListNode<IsMutate>& node = get(id);
         assert(node.refcnt != 0);
         node.refcnt++;
         assert(node.refcnt != 0);  // Overflow check
@@ -422,10 +464,11 @@ struct SyncEnv
 
     // Decrement reference count of visibility record,
     // and handle necessary free-ing in case of 0 refcnt.
-    void decref(nodepool::id<VisRecordListNode> id) noexcept
+    template <bool IsMutate>
+    void decref(nodepool::id<VisRecordListNode<IsMutate>> id) noexcept
     {
         assert(id);
-        VisRecordListNode& node = get(id);
+        VisRecordListNode<IsMutate>& node = get(id);
         if (0 == --node.refcnt) {
             if (node.is_forwarded()) {
                 // Add physical storage of victim visibility record to free chain,
@@ -468,10 +511,11 @@ struct SyncEnv
         p_data->pending_await_list = {};
     }
 
-    void free_single_vis_record(nodepool::id<VisRecordListNode> id) noexcept
+    template <bool IsMutate>
+    void free_single_vis_record(nodepool::id<VisRecordListNode<IsMutate>> id) noexcept
     {
         assert(id);
-        VisRecordListNode& node = get(id);
+        VisRecordListNode<IsMutate>& node = get(id);
         assert(node.refcnt == 0);
         reset_vis_record_data(&node.base_data);
         node.exospork_next_id = {};  // Avoid freeing entire list.
@@ -489,7 +533,7 @@ struct SyncEnv
         // Decref read visibility records.
         auto read_id = p_record->read_vis_records_head_id;
         while (read_id) {
-            ReadVisRecordListNode& node = get(read_id);
+            AssignmentRecordReadNode& node = get(read_id);
             decref(node.vis_record_id);
             read_id = node.exospork_next_id;
         }
@@ -538,7 +582,8 @@ struct SyncEnv
 
     // Allocate a new visibility record whose visibility set consists of one interval.
     // This will later need to be added to the memoization table.
-    nodepool::id<VisRecordListNode> alloc_visibility_record(SigthreadInterval init_interval)
+    template <bool IsMutate>
+    nodepool::id<VisRecordListNode<IsMutate>> alloc_visibility_record(SigthreadInterval init_interval)
     {
         assert(init_interval.tid_hi > init_interval.tid_lo);
 
@@ -546,8 +591,8 @@ struct SyncEnv
         SigthreadIntervalListNode& sigthreads_node = alloc_default_node(&sigthreads_id);
         sigthreads_node.data = init_interval;
 
-        nodepool::id<VisRecordListNode> vis_record_id;
-        VisRecordListNode& vis_record = alloc_default_node(&vis_record_id);
+        nodepool::id<VisRecordListNode<IsMutate>> vis_record_id;
+        VisRecordListNode<IsMutate>& vis_record = alloc_default_node(&vis_record_id);
         vis_record.refcnt = 1;
         vis_record.base_data.original_actor_signature = init_interval.get_unique_actor_signature();
         vis_record.base_data.visibility_set = sigthreads_id;
@@ -902,12 +947,13 @@ struct SyncEnv
     // with ID of base visibility record that the original record forwarded to.
     // Assumes the given ID is intended as an owning ID.
     // Return record data.
-    VisRecord& remove_forwarding(nodepool::id<VisRecordListNode>* p_id) noexcept
+    template <bool IsMutate>
+    VisRecord& remove_forwarding(nodepool::id<VisRecordListNode<IsMutate>>* p_id) noexcept
     {
-        const nodepool::id<VisRecordListNode> old_id = *p_id;
-        nodepool::id<VisRecordListNode> id = old_id;
+        const nodepool::id<VisRecordListNode<IsMutate>> old_id = *p_id;
+        nodepool::id<VisRecordListNode<IsMutate>> id = old_id;
         assert(id);
-        VisRecordListNode* p_node = &get(id);
+        VisRecordListNode<IsMutate>* p_node = &get(id);
         assert(p_node->refcnt != 0);
 
         if (!p_node->is_forwarded()) {
@@ -933,10 +979,11 @@ struct SyncEnv
     // Like remove_forwarding but non-destructive, i.e., don't actually replace the ID of a forwarding visibility
     // record with that of the forwarded-to base visibility record.
     // NB could easily modify this to return the ID as well, but not needed for now.
-    VisRecord const_resolve_forwarding(nodepool::id<VisRecordListNode> id) const noexcept
+    template <bool IsMutate>
+    VisRecord const_resolve_forwarding(nodepool::id<VisRecordListNode<IsMutate>> id) const noexcept
     {
         assert(id);
-        const VisRecordListNode* p_node = &get(id);
+        const VisRecordListNode<IsMutate>* p_node = &get(id);
         assert(p_node->refcnt != 0);
 
         while (p_node->is_forwarded()) {
@@ -961,7 +1008,7 @@ struct SyncEnv
     // internal consistency.
     // This is based on this function being available
     //
-    //     this->process_bucket(nodepool::id<VisRecordListNode>*, Command)
+    //     this->process_bucket(nodepool::id<VisRecordListNode<IsMutate>>*, Command)
     //
     // which may modify or delete the bucket (linked list) that has been passed.
     //
@@ -982,18 +1029,27 @@ struct SyncEnv
     //   that process_bucket may move items from smaller to larger buckets
     //   (so we need to avoid double-processing). This is a subtle thing to
     //   account for if we modify the bucketing scheme.
-    template <BucketProcessType Type, typename Command>
-    nodepool::id<VisRecordListNode> for_buckets(SigthreadInterval minimal_superset, const Command& command)
+    template <bool IsMutate, BucketProcessType Type, typename Command>
+    nodepool::id<VisRecordListNode<IsMutate>> for_buckets(SigthreadInterval minimal_superset, const Command& command)
     {
-        return this->for_buckets_impl<Type>(&top_level_bucket,
-                                            minimal_superset.tid_lo,
-                                            minimal_superset.tid_hi, command);
+        if constexpr (IsMutate) {
+            return this->for_buckets_impl<Type>(&mutate_top_level_bucket,
+                                                minimal_superset.tid_lo,
+                                                minimal_superset.tid_hi, command);
+        }
+        else {
+            return this->for_buckets_impl<Type>(&read_top_level_bucket,
+                                                minimal_superset.tid_lo,
+                                                minimal_superset.tid_hi, command);
+        }
     }
 
-    template <BucketProcessType Type, uint32_t BucketLevel, typename Command>
-    nodepool::id<VisRecordListNode> for_buckets_impl(IntervalBucket<BucketLevel>* p_bucket,
-                                                     int64_t relative_tid_lo, int64_t relative_tid_hi,
-                                                     const Command& command)
+    template <BucketProcessType Type, uint32_t BucketLevel, typename Command, bool IsMutate>
+    nodepool::id<VisRecordListNode<IsMutate>> for_buckets_impl(
+            IntervalBucket<IsMutate, BucketLevel>* p_bucket,
+            int64_t relative_tid_lo,
+            int64_t relative_tid_hi,
+            const Command& command)
     {
         if constexpr (Type != BucketProcessType::Insert && BucketLevel < bucket_level_count - 1) {
             // Left behind empty bucket that should have been de-allocated.
@@ -1002,7 +1058,7 @@ struct SyncEnv
 
         assert(relative_tid_lo < relative_tid_hi);  // Input interval needs to be non-empty
         constexpr bool ExactType = Type != BucketProcessType::MapAll;
-        nodepool::id<VisRecordListNode> result_id{};
+        nodepool::id<VisRecordListNode<IsMutate>> result_id{};
 
         // Calculate inclusive range of child buckets that intersect the input interval.
         constexpr uint32_t child_size{bucket_level_size<BucketLevel - 1>};
@@ -1012,7 +1068,7 @@ struct SyncEnv
 
         auto visit_child = [this, p_bucket, relative_tid_lo, relative_tid_hi, &command] (uint32_t child_index)
         {
-            nodepool::id<VisRecordListNode> lambda_result_id = {};
+            nodepool::id<VisRecordListNode<IsMutate>> lambda_result_id = {};
             assert(child_index < p_bucket->child_count);
             auto& child_ref = p_bucket->child_interval_buckets[child_index];
 
@@ -1029,7 +1085,7 @@ struct SyncEnv
 
                     if constexpr (BucketLevel != 1) {
                         // Create child interval bucket (unique_ptr).
-                        child_ref.reset(new IntervalBucket<BucketLevel - 1>);
+                        child_ref.reset(new IntervalBucket<IsMutate, BucketLevel - 1>);
                         child_ref->p_parent = p_bucket;
                         child_ref->child_index_in_parent = child_index;
                     }
@@ -1106,14 +1162,16 @@ struct SyncEnv
 
     // Find visibility record in memoization bucket for which lambda(const VisRecord&) returns true.
     // Returns pointer to ID of record found (non-owning), or null if not found.
-    template <typename Lambda>
-    nodepool::id<VisRecordListNode>* bucket_search(nodepool::id<VisRecordListNode>* p_bucket_head, Lambda&& lambda)
+    template <bool IsMutate, typename Lambda>
+    nodepool::id<VisRecordListNode<IsMutate>>* bucket_search(
+            nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head,
+            Lambda&& lambda)
     {
-        using node_id = nodepool::id<VisRecordListNode>;
+        using node_id = nodepool::id<VisRecordListNode<IsMutate>>;
         node_id* p_id = p_bucket_head;
 
         for (node_id id; (id = *p_id); ) {
-            VisRecordListNode& node = get(id);
+            VisRecordListNode<IsMutate>& node = get(id);
             assert(!node.is_forwarded());  // Should not be in memoization table.
 
             if (lambda(node.base_data)) {
@@ -1133,29 +1191,32 @@ struct SyncEnv
 
     // Add a new visibility record, or return existing memoized one, constructed from the given sigthread interval set.
     // The returned ID is an owning reference (ownership count given by added_refcnt).
-    [[nodiscard]] nodepool::id<VisRecordListNode> memoize_new_vis_record(SigthreadInterval init_interval,
-                                                                         uint32_t added_refcnt)
+    template <bool IsMutate>
+    [[nodiscard]] nodepool::id<VisRecordListNode<IsMutate>> memoize_new_vis_record(SigthreadInterval init_interval,
+                                                                                   uint32_t added_refcnt)
     {
         assert(init_interval.tid_hi > init_interval.tid_lo);
         assert(init_interval.sigbits() != 0);
         assert(added_refcnt != 0);
 
         NewVisRecordCommand command{init_interval, added_refcnt};
-        nodepool::id<VisRecordListNode> id = for_buckets<BucketProcessType::Insert>(init_interval, command);
+        nodepool::id<VisRecordListNode<IsMutate>> id =
+                for_buckets<IsMutate, BucketProcessType::Insert>(init_interval, command);
         assert(id);
         assert(equal(const_resolve_forwarding(id), init_interval));
         return id;
     }
 
-    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head,
-                                                   NewVisRecordCommand command)
+    template <bool IsMutate>
+    nodepool::id<VisRecordListNode<IsMutate>> process_bucket(nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head,
+                                                             NewVisRecordCommand command)
     {
         auto lambda = [this, command] (const VisRecord& record) {
             return equal(record, command.init_interval);
         };
-        nodepool::id<VisRecordListNode>* p_found_id = bucket_search(p_bucket_head, lambda);
+        nodepool::id<VisRecordListNode<IsMutate>>* p_found_id = bucket_search(p_bucket_head, lambda);
 
-        nodepool::id<VisRecordListNode> new_id;
+        nodepool::id<VisRecordListNode<IsMutate>> new_id;
 
         if (p_found_id) {
             // Existing memoized entry found.
@@ -1165,7 +1226,7 @@ struct SyncEnv
         }
         else {
             // Add memoized base visibility set entry to bucket of memoization table.
-            new_id = alloc_visibility_record(command.init_interval);
+            new_id = alloc_visibility_record<IsMutate>(command.init_interval);
             assert(!get(new_id).exospork_next_id);
             get(new_id).refcnt = command.added_refcnt;
             assert(!get(new_id).is_forwarded());
@@ -1175,32 +1236,36 @@ struct SyncEnv
         return new_id;
     }
 
+    template <bool IsMutate>
     struct RemoveMemoizedCommand
     {
-        const VisRecordListNode* p_node;
+        const VisRecordListNode<IsMutate>* p_node;
     };
 
     // This removes the given node from the memoization table, but does not decrement the reference count or free it.
     // Recall that the memoization table does not own (reference count) the VisRecords contained.
-    [[nodiscard]] nodepool::id<VisRecordListNode> remove_memoized(const VisRecordListNode* p_node) noexcept
+    template <bool IsMutate>
+    [[nodiscard]] nodepool::id<VisRecordListNode<IsMutate>> remove_memoized(
+            const VisRecordListNode<IsMutate>* p_node) noexcept
     {
         assert(p_node);
         assert(p_node->refcnt == 0);
         assert(!p_node->is_forwarded());
 
-        RemoveMemoizedCommand command{p_node};
+        RemoveMemoizedCommand<IsMutate> command{p_node};
         auto bucket_key = minimal_superset_interval(p_node->base_data.visibility_set);
-        return for_buckets<BucketProcessType::Find>(bucket_key, command);
+        return for_buckets<IsMutate, BucketProcessType::Find>(bucket_key, command);
     }
 
     // Find and remove node in bucket.
-    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head,
-                                                   RemoveMemoizedCommand command)
+    template <bool IsMutate>
+    nodepool::id<VisRecordListNode<IsMutate>> process_bucket(nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head,
+                                                             RemoveMemoizedCommand<IsMutate> command)
     {
         auto lambda = [this, command] (const VisRecord& record) {
             return equal(record, command.p_node->base_data);
         };
-        nodepool::id<VisRecordListNode>* p_id = bucket_search(p_bucket_head, lambda);
+        nodepool::id<VisRecordListNode<IsMutate>>* p_id = bucket_search(p_bucket_head, lambda);
         if (p_id) {
             return remove_next_node(p_id);
         }
@@ -1209,28 +1274,32 @@ struct SyncEnv
         }
     }
 
+    template <bool IsMutate>
     struct FindMemoizedCommand
     {
-        const VisRecordListNode* p_node;
+        const VisRecordListNode<IsMutate>* p_node;
     };
 
-    nodepool::id<VisRecordListNode> find_memoized(const VisRecordListNode* p_node) const noexcept
+    template <bool IsMutate>
+    nodepool::id<VisRecordListNode<IsMutate>> find_memoized(const VisRecordListNode<IsMutate>* p_node) const noexcept
     {
         assert(p_node);
         assert(!p_node->is_forwarded());
 
-        FindMemoizedCommand command{p_node};
+        FindMemoizedCommand<IsMutate> command{p_node};
         auto bucket_key = minimal_superset_interval(p_node->base_data.visibility_set);
-        return const_cast<SyncEnv*>(this)->for_buckets<BucketProcessType::Find>(bucket_key, command);
+        return const_cast<SyncEnv*>(this)->for_buckets<IsMutate, BucketProcessType::Find>(bucket_key, command);
     }
 
-    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head,
-                                                   FindMemoizedCommand command) noexcept
+    template <bool IsMutate>
+    nodepool::id<VisRecordListNode<IsMutate>> process_bucket(
+            nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head,
+            FindMemoizedCommand<IsMutate> command) noexcept
     {
         auto lambda = [this, command] (const VisRecord& record) {
             return equal(record, command.p_node->base_data);
         };
-        nodepool::id<VisRecordListNode>* p_id = bucket_search(p_bucket_head, lambda);
+        nodepool::id<VisRecordListNode<IsMutate>>* p_id = bucket_search(p_bucket_head, lambda);
         if (p_id) {
             return *p_id;
         }
@@ -1239,38 +1308,42 @@ struct SyncEnv
         }
     }
 
+    template <bool IsMutate>
     struct MemoizeOrForwardCommand
     {
-        nodepool::id<VisRecordListNode> input_id;
+        nodepool::id<VisRecordListNode<IsMutate>> input_id;
     };
 
     // Given an existing visibility record in the base state that's not in the memoization table, either
     //   * Add it to the memoization table, if it's unique.
     //   * Put it in the forwarding state (discard existing state) and forward to equal already-memoized record.
-    void memoize_or_forward(nodepool::id<VisRecordListNode> id)
+    template <bool IsMutate>
+    void memoize_or_forward(nodepool::id<VisRecordListNode<IsMutate>> id)
     {
         assert(id);
-        VisRecordListNode& node = get(id);
+        VisRecordListNode<IsMutate>& node = get(id);
         assert(node.refcnt != 0);
         assert(!node.is_forwarded());
         assert(!node.exospork_next_id);  // shouldn't be in any linked list (memoization bucket or forwarded?)
 
-        MemoizeOrForwardCommand command{id};
+        MemoizeOrForwardCommand<IsMutate> command{id};
         auto bucket_key = minimal_superset_interval(node.base_data.visibility_set);
-        for_buckets<BucketProcessType::Insert>(bucket_key, command);
+        for_buckets<IsMutate, BucketProcessType::Insert>(bucket_key, command);
     }
 
-    nodepool::id<VisRecordListNode> process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head,
-                                                   MemoizeOrForwardCommand command)
+    template <bool IsMutate>
+    nodepool::id<VisRecordListNode<IsMutate>> process_bucket(
+            nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head,
+            MemoizeOrForwardCommand<IsMutate> command)
     {
-        VisRecordListNode& input_node = get(command.input_id);
+        VisRecordListNode<IsMutate>& input_node = get(command.input_id);
         VisRecord input_vis_record = input_node.base_data;
 
         auto lambda = [this, input_vis_record] (const VisRecord& record) {
             return equal(record, input_vis_record);
         };
 
-        nodepool::id<VisRecordListNode>* p_id = bucket_search(p_bucket_head, lambda);
+        nodepool::id<VisRecordListNode<IsMutate>>* p_id = bucket_search(p_bucket_head, lambda);
         if (p_id) {
             // If equivalent memoized node found in bucket, forward input node to it.
             const nodepool::id fwd_id = *p_id;
@@ -1296,8 +1369,9 @@ struct SyncEnv
     struct FenceUpdateCommand
     {
         SigthreadInterval V1;
-        SigthreadInterval V2;
+        SigthreadInterval V2;  // TODO
 
+        template <bool IsMutate>
         void update_for_sync(SyncEnv& env, VisRecord* p_record) const
         {
             if (env.synchronizes_with<Transitive>(*p_record, V1)) {
@@ -1312,6 +1386,7 @@ struct SyncEnv
         SigthreadInterval V1;
         pending_await_t await_id;
 
+        template <bool IsMutate>
         void update_for_sync(SyncEnv& env, VisRecord* p_record) const
         {
             if (env.synchronizes_with<Transitive>(*p_record, V1)) {
@@ -1323,9 +1398,10 @@ struct SyncEnv
     struct AwaitUpdateCommand
     {
         SigthreadInterval V1;
-        SigthreadInterval V2;
+        SigthreadInterval V2;  // TODO
         pending_await_t await_id;
 
+        template <bool IsMutate>
         void update_for_sync(SyncEnv& env, VisRecord* p_record) const
         {
             if (env.remove_pending_await(p_record, await_id)) {
@@ -1346,11 +1422,12 @@ struct SyncEnv
         // Only visibility sets that intersect the first visibility set (V1) can be updated by this sync.
         // This is even the case for Await, assuming the V1 for the corresponding Arrive was correctly given.
         const SigthreadInterval minimal_superset = command.V1;
-        for_buckets<BucketProcessType::MapAll>(minimal_superset, command);
+        for_buckets<false, BucketProcessType::MapAll>(minimal_superset, command);
+        for_buckets<true, BucketProcessType::MapAll>(minimal_superset, command);
     }
 
-    template <typename Command>
-    void process_bucket_for_sync_impl(nodepool::id<VisRecordListNode>* p_bucket_head, const Command& command)
+    template <bool IsMutate, typename Command>
+    void process_bucket_for_sync_impl(nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head, const Command& command)
     {
         // The bucket update process for handling the effects of synchronization on visibility records is quite
         // risky actually. When we modify a visibility record, we temporarily remove it from the memoization bucket,
@@ -1363,7 +1440,7 @@ struct SyncEnv
         //
         // Note, everything will be left in an inconsistent state in case an exception is thrown.
 
-        using node_id = nodepool::id<VisRecordListNode>;
+        using node_id = nodepool::id<VisRecordListNode<IsMutate>>;
         node_id* p_id = p_bucket_head;
 
         // This might be really confusing. p_id is a pointer to a node ID.
@@ -1374,12 +1451,12 @@ struct SyncEnv
             // ("next_node" reflects the "pointer to previous node" viewpoint explained above).
             // *p_id will now be the ID of the node that formerly was after current_node, which (if not ID = 0)
             // is the node that we should process on the next iteration.
-            VisRecordListNode& current_node = get(remove_next_node(p_id));
+            VisRecordListNode<IsMutate>& current_node = get(remove_next_node(p_id));
             assert(!current_node.exospork_next_id);// Should have been removed from list.
             assert(!current_node.is_forwarded());  // Invalid empty visibility set (forwarding state memoized?)
 
             // Update the visibility record stored in the node.
-            command.update_for_sync(*this, &current_node.base_data);
+            command.template update_for_sync<IsMutate>(*this, &current_node.base_data);
             assert(p_id != &current_node.exospork_next_id);
 
             // This is where the node might get re-inserted to the memoization table.
@@ -1415,8 +1492,10 @@ struct SyncEnv
         }
     }
 
-    template <bool Transitive>
-    void process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head, const FenceUpdateCommand<Transitive>& command)
+    template <bool IsMutate, bool Transitive>
+    void process_bucket(
+            nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head,
+            const FenceUpdateCommand<Transitive>& command)
     {
         process_bucket_for_sync_impl(p_bucket_head, command);
     }
@@ -1434,8 +1513,10 @@ struct SyncEnv
         }
     }
 
-    template <bool Transitive>
-    void process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head, const ArriveUpdateCommand<Transitive>& command)
+    template <bool IsMutate, bool Transitive>
+    void process_bucket(
+            nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head,
+            const ArriveUpdateCommand<Transitive>& command)
     {
         process_bucket_for_sync_impl(p_bucket_head, command);
     }
@@ -1449,7 +1530,8 @@ struct SyncEnv
         update_vis_records_for_sync_impl(command);
     }
 
-    void process_bucket(nodepool::id<VisRecordListNode>* p_bucket_head, const AwaitUpdateCommand& command)
+    template <bool IsMutate>
+    void process_bucket(nodepool::id<VisRecordListNode<IsMutate>>* p_bucket_head, const AwaitUpdateCommand& command)
     {
         process_bucket_for_sync_impl(p_bucket_head, command);
     }
@@ -1508,7 +1590,7 @@ struct SyncEnv
 
 
 
-    template <bool IsWrite>
+    template <bool IsMutate>
     void checked_on_access_impl(size_t N,
                                 exospork_syncv_value_t* p_assignment_record_ids,
                                 SigthreadInterval accessor_set)
@@ -1517,7 +1599,8 @@ struct SyncEnv
         if (N == 0) {
             return;
         }
-        nodepool::id<VisRecordListNode> vis_record_id = memoize_new_vis_record(accessor_set, uint32_t(N));
+        nodepool::id<VisRecordListNode<IsMutate>> vis_record_id =
+                memoize_new_vis_record<IsMutate>(accessor_set, uint32_t(N));
 
         for (size_t i = 0; i < N; ++i) {
             AssignmentRecord& assignment_record = lazy_from_api(p_assignment_record_ids + i);
@@ -1529,10 +1612,10 @@ struct SyncEnv
             }
 
             // If the access is a write, also check against the list of previous read visibility records.
-            if constexpr (IsWrite) {
-                nodepool::id<ReadVisRecordListNode> read_id = assignment_record.read_vis_records_head_id;
+            if constexpr (IsMutate) {
+                nodepool::id<AssignmentRecordReadNode> read_id = assignment_record.read_vis_records_head_id;
                 while (read_id) {
-                    ReadVisRecordListNode& node = get(read_id);
+                    AssignmentRecordReadNode& node = get(read_id);
                     const VisRecord& read_record = remove_forwarding(&node.vis_record_id);
                     assert(visible_to(read_record, accessor_set));  // TODO shouldn't be assert: WAR hazard
                     read_id = get(read_id).exospork_next_id;
@@ -1541,7 +1624,7 @@ struct SyncEnv
 
             // Add new visibility record (either as new write visibility record, or appended read visibility record).
 
-            if constexpr (IsWrite) {
+            if constexpr (IsMutate) {
                 // Clear out assignment record on write and add the single write visibility record.
                 reset_assignment_record(&assignment_record);
                 assignment_record.write_vis_record_id = vis_record_id;
@@ -1551,8 +1634,8 @@ struct SyncEnv
             }
             else {
                 // Add the new visibility record to the list of read visibility records.
-                nodepool::id<ReadVisRecordListNode> read_id;
-                ReadVisRecordListNode& read_node = alloc_default_node(&read_id);
+                nodepool::id<AssignmentRecordReadNode> read_id;
+                AssignmentRecordReadNode& read_node = alloc_default_node(&read_id);
                 read_node.vis_record_id = vis_record_id;
                 insert_next_node(&assignment_record.read_vis_records_head_id, read_id);
 
@@ -1605,11 +1688,11 @@ struct SyncEnv
     // (both referring to the shared entry in the memoization table).
     void assignment_record_remove_duplicates(AssignmentRecord* p_assignment_record)
     {
-        using node_id = nodepool::id<ReadVisRecordListNode>;
+        using node_id = nodepool::id<AssignmentRecordReadNode>;
 
         // Clear out tmp_is_duplicate to 0.
         for (node_id id = p_assignment_record->read_vis_records_head_id; id; ) {
-            const ReadVisRecordListNode node = get(id);
+            const AssignmentRecordReadNode node = get(id);
             get(node.vis_record_id).base_data.tmp_is_duplicate = 0;
             id = node.exospork_next_id;
         }
@@ -1618,7 +1701,7 @@ struct SyncEnv
         // and tmp_is_duplicate to recognize duplicates.
         node_id* p_read_id = &p_assignment_record->read_vis_records_head_id;
         while (node_id next_id = *p_read_id) {
-            ReadVisRecordListNode& next_node = get(next_id);
+            AssignmentRecordReadNode& next_node = get(next_id);
             uint8_t& is_duplicate = remove_forwarding(&next_node.vis_record_id).tmp_is_duplicate;
 
             if (is_duplicate) {
@@ -1649,19 +1732,20 @@ struct SyncEnv
     void debug_get_read_vis_record_ids(const AssignmentRecord& record, std::vector<uint32_t>* out) const
     {
         out->clear();
-        nodepool::id<ReadVisRecordListNode> id = record.read_vis_records_head_id;
+        nodepool::id<AssignmentRecordReadNode> id = record.read_vis_records_head_id;
         while (id) {
-            const ReadVisRecordListNode& node = get(id);
+            const AssignmentRecordReadNode& node = get(id);
             out->push_back(node.vis_record_id._1_index);
             id = node.exospork_next_id;
         }
     }
 
     // Get info for a given visibility record.
+    template <bool IsMutate>
     void debug_get_vis_record_data(uint32_t id, VisRecordDebugData* out) const
     {
         assert(id);
-        const VisRecord record = const_resolve_forwarding(nodepool::id<VisRecordListNode>{id});
+        const VisRecord record = const_resolve_forwarding(nodepool::id<VisRecordListNode<IsMutate>>{id});
 
         out->original_actor_signature = record.original_actor_signature;
 
@@ -1694,27 +1778,69 @@ struct SyncEnv
         debug_registered_assignment_records.erase(it);
     }
 
+    template <typename ListNode>
+    struct RefcntDebug
+    {
+        std::vector<refcnt_t> refcnts;
+        Set<nodepool::id<ListNode>> free_node_ids;
+
+        RefcntDebug(const SyncEnv& self)
+          : refcnts(self.debug_node_pool_size<ListNode>())
+          , free_node_ids(self.debug_free_node_ids<ListNode>())
+        {
+        }
+
+        void check_refcnts(const SyncEnv& self)
+        {
+            for (nodepool::id<ListNode> id{1}; id._1_index <= refcnts.size(); id._1_index++) {
+                const refcnt_t tested_refcnt = self.get(id).get_refcnt();
+                const refcnt_t expected_refcnt = refcnts[id._1_index - 1];
+                const bool is_free = free_node_ids.count(id);
+                if (is_free) {
+                    assert(expected_refcnt == 0);
+                }
+                else {
+                    assert(expected_refcnt == tested_refcnt);
+                }
+            }
+        }
+    };
+
     // Massive function that verifies that the current state is legal.
     // This only works if all of the user's arrays of exospork_syncv_value_t have been debug registered,
     // which otherwise is not needed for correct operation of the SyncEnv.
     void debug_validate_state() const
     {
-        std::vector<refcnt_t> read_refcnts(debug_node_pool_size<ReadVisRecordListNode>());
-        std::vector<refcnt_t> vis_refcnts(debug_node_pool_size<VisRecordListNode>());
-        std::vector<refcnt_t> sigthread_refcnts(debug_node_pool_size<SigthreadIntervalListNode>());
-        std::vector<refcnt_t> await_refcnts(debug_node_pool_size<PendingAwaitListNode>());
-        std::vector<refcnt_t> assignment_refcnts(debug_node_pool_size<AssignmentRecord>());
+        std::tuple<
+            RefcntDebug<AssignmentRecord>,
+            RefcntDebug<SigthreadIntervalListNode>,
+            RefcntDebug<PendingAwaitListNode>,
+            RefcntDebug<ReadVisRecordListNode>,
+            RefcntDebug<MutateVisRecordListNode>,
+            RefcntDebug<AssignmentRecordReadNode>,
+            RefcntDebug<AssignmentRecordMutateNode>>
+        debug_refcnts(
+            *this, *this, *this, *this, *this, *this, *this
+        );
 
-        const auto free_read_ids = debug_free_node_ids<ReadVisRecordListNode>();
-        const auto free_vis_ids = debug_free_node_ids<VisRecordListNode>();
-        const auto free_sigthread_ids = debug_free_node_ids<SigthreadIntervalListNode>();
-        const auto free_await_ids = debug_free_node_ids<PendingAwaitListNode>();
-
-        auto record_owning = [] (std::vector<refcnt_t>* p_refcnts, auto id) -> bool  // First time flag
+        auto check_all_refcnts = [&]
         {
+            std::get<0>(debug_refcnts).check_refcnts(*this);
+            std::get<1>(debug_refcnts).check_refcnts(*this);
+            std::get<2>(debug_refcnts).check_refcnts(*this);
+            std::get<3>(debug_refcnts).check_refcnts(*this);
+            std::get<4>(debug_refcnts).check_refcnts(*this);
+            std::get<5>(debug_refcnts).check_refcnts(*this);
+            std::get<6>(debug_refcnts).check_refcnts(*this);
+        };
+
+        auto record_owning = [&] (auto id) -> bool  // First time flag
+        {
+            std::vector<refcnt_t>& refcnts =
+                    std::get<RefcntDebug<typename decltype(id)::value_type>>(debug_refcnts).refcnts;
             if (id) {
-                assert(id._1_index <= p_refcnts->size());
-                auto refcnt_before = p_refcnts->at(id._1_index - 1)++;
+                assert(id._1_index <= refcnts.size());
+                auto refcnt_before = refcnts.at(id._1_index - 1)++;
                 return refcnt_before == 0;
             }
             return false;
@@ -1722,26 +1848,26 @@ struct SyncEnv
 
         auto process_assignment_record = [&] (nodepool::id<AssignmentRecord> id, auto recurse)
         {
-            const bool first_time = record_owning(&assignment_refcnts, id);
+            const bool first_time = record_owning(id);
             if (!first_time) {
                 return;
             }
             const AssignmentRecord& record = get(id);
-            record_owning(&vis_refcnts, record.write_vis_record_id);
+            record_owning(record.write_vis_record_id);
 
-            nodepool::id<ReadVisRecordListNode> read_id = record.read_vis_records_head_id;
+            nodepool::id<AssignmentRecordReadNode> read_id = record.read_vis_records_head_id;
             while (read_id) {
-                const ReadVisRecordListNode& read_node = get(read_id);
+                const AssignmentRecordReadNode& read_node = get(read_id);
                 assert(read_node.vis_record_id);
-                record_owning(&read_refcnts, read_id);
-                record_owning(&vis_refcnts, read_node.vis_record_id);
+                record_owning(read_id);
+                record_owning(read_node.vis_record_id);
                 read_id = read_node.exospork_next_id;
             }
             recurse(record.exospork_next_id, recurse);
         };
 
         // Count ownership references of AssignmentRecord.
-        // Further count ownership references from AssignmentRecord to ReadVisRecordListNode, VisRecordListNode.
+        // Further count ownership references from AssignmentRecord to VisRecordListNode, AssignmentRecordVisNode
         for (const auto& array_length_pair : debug_registered_assignment_records) {
             exospork_syncv_value_t* ptr = array_length_pair.first;
             size_t sz = array_length_pair.second;
@@ -1757,19 +1883,20 @@ struct SyncEnv
         //   * PendingAwaitListNode
         //   * forwarded-to VisRecordListNodes
         // Furthermore we validate that the encoding for the visibility set is correct.
-        for (nodepool::id<VisRecordListNode> id{1}; id._1_index <= vis_refcnts.size(); ++id._1_index) {
+        auto process_vis_record_impl = [&] (auto id, const auto& free_vis_ids)
+        {
             if (free_vis_ids.count(id)) {
-                continue;  // Ignore non-allocated VisRecordListNode.
+                return;  // Exit lambda: ignore non-allocated VisRecordListNode.
             }
-            const VisRecordListNode& node = get(id);
+            const auto& node = get(id);
 
             if (node.is_forwarded()) {
                 assert(node.exospork_next_id);
-                record_owning(&vis_refcnts, node.exospork_next_id);
+                record_owning(node.exospork_next_id);
             }
             else {
                 for (nodepool::id<SigthreadIntervalListNode> node_id = node.base_data.visibility_set; node_id; ) {
-                    record_owning(&sigthread_refcnts, node_id);
+                    record_owning(node_id);
                     SigthreadIntervalListNode this_node = get(node_id);
                     assert(this_node.data.tid_hi > this_node.data.tid_lo);
                     assert(this_node.data.sigbits() != 0);
@@ -1786,53 +1913,41 @@ struct SyncEnv
                 }
 
                 for (nodepool::id<PendingAwaitListNode> node_id = node.base_data.pending_await_list; node_id; ) {
-                    record_owning(&await_refcnts, node_id);
+                    record_owning(node_id);
                     PendingAwaitListNode node = get(node_id);
                     node_id = node.exospork_next_id;
                 }
             }
-        }
+        };
+
+        auto process_all_vis_records = [&] (auto id)
+        {
+            using ListNode = typename decltype(id)::value_type;
+            RefcntDebug<ListNode>& debug_info = std::get<RefcntDebug<ListNode>>(debug_refcnts);
+            for (id._1_index = 1; id._1_index <= debug_info.refcnts.size(); ++id._1_index) {
+                process_vis_record_impl(id, debug_info.free_node_ids);
+            }
+        };
+
+        process_all_vis_records(nodepool::id<ReadVisRecordListNode>{});
+        process_all_vis_records(nodepool::id<MutateVisRecordListNode>{});
 
         // Check that reference counts are correct.
         // For node types without refcnt, the refcnt should just be 0 or 1 (unique ownership).
-        for (nodepool::id<AssignmentRecord> id{1}; id._1_index <= assignment_refcnts.size(); ++id._1_index) {
-            const refcnt_t debug_refcnt = assignment_refcnts[id._1_index - 1];
-            assert(debug_refcnt == get(id).refcnt);
-        }
-        for (nodepool::id<ReadVisRecordListNode> id{1}; id._1_index <= read_refcnts.size(); ++id._1_index) {
-            const refcnt_t debug_refcnt = read_refcnts[id._1_index - 1];
-            assert(debug_refcnt == (free_read_ids.count(id) ? 0u : 1u));
-        }
-        for (nodepool::id<SigthreadIntervalListNode> id{1}; id._1_index <= sigthread_refcnts.size(); ++id._1_index) {
-            const refcnt_t debug_refcnt = sigthread_refcnts[id._1_index - 1];
-            assert(debug_refcnt == (free_sigthread_ids.count(id) ? 0u : 1u));
-        }
-        for (nodepool::id<PendingAwaitListNode> id{1}; id._1_index <= await_refcnts.size(); ++id._1_index) {
-            const refcnt_t debug_refcnt = await_refcnts[id._1_index - 1];
-            assert(debug_refcnt == (free_await_ids.count(id) ? 0u : 1u));
-        }
-        for (nodepool::id<VisRecordListNode> id{1}; id._1_index <= vis_refcnts.size(); ++id._1_index) {
-            const refcnt_t debug_refcnt = vis_refcnts[id._1_index - 1];
-            if (free_vis_ids.count(id)) {
-                assert(debug_refcnt == 0);
-            }
-            else {
-                assert(debug_refcnt == get(id).refcnt);
-            }
-        }
-
+        check_all_refcnts();
 
         // Memoization Validation
         // A VisRecord should be in the memoization table iff it's alive and in the base state.
 
 
-        // (VisRecord in memoization table => alive and in base state)
+        // (VisRecord in memoization table -> alive and in base state)
         // We also check that no empty IntervalBucket(s) left behind (besides the top level bucket)
         // and that the tree state is consistent (correct back pointer to parent, correct non-empty child counts).
-        auto validate_bucket_linked_list = [this] (nodepool::id<VisRecordListNode> id)
+        auto validate_bucket_linked_list = [this] (auto id)
         {
             while (id) {
-                const VisRecordListNode& node = get(id);
+                // VisRecordListNode<IsMutate>
+                const auto& node = get(id);
                 assert(node.refcnt != 0);
                 assert(!node.is_forwarded());
                 id = node.exospork_next_id;
@@ -1850,7 +1965,7 @@ struct SyncEnv
                 real_nonempty_child_count += child_bucket_id_or_ptr ? 1u : 0u;
                 if constexpr (bucket.bucket_level != 1) {
                     if (child_bucket_id_or_ptr) {
-                        IntervalBucket<bucket.bucket_level - 1>& child_bucket = *child_bucket_id_or_ptr;
+                        auto& child_bucket = *child_bucket_id_or_ptr;
                         assert(child_bucket.p_parent == &bucket);
                         assert(child_bucket.child_index_in_parent == child_index);
                         assert(!interval_bucket_is_empty(child_bucket));
@@ -1867,25 +1982,34 @@ struct SyncEnv
             assert(bucket.nonempty_child_count == real_nonempty_child_count);
             validate_bucket_linked_list(bucket.bucket);
         };
-        validate_child_buckets(top_level_bucket, validate_child_buckets);
-        validate_bucket_linked_list(top_level_bucket.bucket);
+        validate_child_buckets(read_top_level_bucket, validate_child_buckets);
+        validate_bucket_linked_list(read_top_level_bucket.bucket);
+        validate_child_buckets(mutate_top_level_bucket, validate_child_buckets);
+        validate_bucket_linked_list(mutate_top_level_bucket.bucket);
 
 
-        // (VisRecord in memoization table <= alive and in base state)
+        // (VisRecord in memoization table <- alive and in base state)
         // Each VisRecord should be able to find itself in the table; if we fail, it could be because we
         // forgot to memoize it, or something is wrong with the bucket search or equality function.
-        for (nodepool::id<VisRecordListNode> id{1}; id._1_index <= vis_refcnts.size(); ++id._1_index) {
-            const bool live = vis_refcnts[id._1_index - 1] != 0;
-            if (!live) {
-                continue;
-            }
-            const auto& node = get(id);
-            if (node.is_forwarded()) {
-                continue;
-            }
+        auto memoize_self_check = [&] (auto id)
+        {
+            using ListNode = typename decltype(id)::value_type;
+            RefcntDebug<ListNode>& debug = std::get<RefcntDebug<ListNode>>(debug_refcnts);
+            for (id._1_index = 1; id._1_index <= debug.refcnts.size(); ++id._1_index) {
+                const bool live = debug.refcnts[id._1_index - 1] != 0;
+                if (!live) {
+                    continue;
+                }
+                const auto& node = get(id);
+                if (node.is_forwarded()) {
+                    continue;
+                }
 
-            assert(id == find_memoized(&node));
-        }
+                assert(id == find_memoized(&node));
+            }
+        };
+        memoize_self_check(nodepool::id<ReadVisRecordListNode>{});
+        memoize_self_check(nodepool::id<MutateVisRecordListNode>{});
     }
 };
 
@@ -1926,7 +2050,9 @@ void delete_sync_env(SyncEnv* p_env)
 {
     // XXX temporary assert. This could go off due to the user not free-ing their own stuff, which I consider valid
     // (if suboptimal) usage, since deleting SyncEnv cleans up all physical memory allocations anyway.
-    assert(p_env->failed || interval_bucket_is_empty(p_env->top_level_bucket));
+    const bool all_empty = interval_bucket_is_empty(p_env->read_top_level_bucket)
+            && interval_bucket_is_empty(p_env->mutate_top_level_bucket);
+    assert(p_env->failed || all_empty);
 
     delete p_env;
 }
@@ -2014,9 +2140,14 @@ void debug_unregister_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* v
     p_env->debug_unregister_values(N, values);
 }
 
-void debug_get_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out)
+void debug_get_read_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out)
 {
-    p_env->debug_get_vis_record_data(id, out);
+    p_env->debug_get_vis_record_data<false>(id, out);
+}
+
+void debug_get_mutate_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out)
+{
+    p_env->debug_get_vis_record_data<true>(id, out);
 }
 
 void debug_validate_state(SyncEnv* p_env)

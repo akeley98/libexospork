@@ -39,7 +39,7 @@ struct exospork_syncv_value_t
 // Opaque value for each barrier.
 struct exospork_syncv_barrier_t
 {
-    uint64_t data;
+    uint32_t data;
 };
 
 void exospork_syncv_init(size_t sizeof_struct,
