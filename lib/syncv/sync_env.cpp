@@ -1027,10 +1027,11 @@ struct SyncEnv
     //   Returns ID given by process_bucket.
     //
     // MapAll: not exact; returns 0 ID.
-    //   We process smaller buckets before larger buckets, on the assumption
+    //   We process smaller buckets after larger buckets, on the assumption
     //   that process_bucket may move items from smaller to larger buckets
     //   (so we need to avoid double-processing). This is a subtle thing to
     //   account for if we modify the bucketing scheme.
+    //   TODO: is this reasoning correct?
     template <bool IsMutate, BucketProcessType Type, typename Command>
     nodepool::id<VisRecordListNode<IsMutate>> for_buckets(SigthreadInterval minimal_superset, const Command& command)
     {
@@ -1140,12 +1141,12 @@ struct SyncEnv
                 }
             }
             else {
-                // Non-exact; we process smaller (child) buckets first before larger (this level's) buckets.
-                for (uint32_t child_index = child_min_index; child_index <= child_max_index; ++child_index) {
-                    visit_child(child_index);
-                }
+                // Non-exact; we process smaller (child) buckets after larger (this level's) buckets.
                 if (p_bucket->bucket) {
                     this->process_bucket(&p_bucket->bucket, command);
+                }
+                for (uint32_t child_index = child_min_index; child_index <= child_max_index; ++child_index) {
+                    visit_child(child_index);
                 }
             }
         }
