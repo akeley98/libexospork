@@ -61,7 +61,7 @@ void exospork_syncv_free_barrier(int lineno, exospork_syncv_barrier_t* bar);
 
 void exospork_syncv_fence(
         int lineno, uint32_t tid_lo, uint32_t tid_hi,
-        uint32_t v1_sigbits, uint32_t v2_sigbits, int transitive);
+        uint32_t v1_sigbits, uint32_t v2_full_sigbits, uint32_t v2_temporal_sigbits, int transitive);
 
 void exospork_syncv_arrive(
         int lineno, exospork_syncv_barrier_t* bar,
@@ -70,7 +70,7 @@ void exospork_syncv_arrive(
 
 void exospork_syncv_await(
         int lineno, exospork_syncv_barrier_t* bar,
-        uint32_t v2_tid_lo, uint32_t v2_tid_hi, uint32_t v2_sigbits);
+        uint32_t v2_tid_lo, uint32_t v2_tid_hi, uint32_t v2_full_sigbits, uint32_t v2_temporal_sigbits);
 
 
 

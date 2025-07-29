@@ -61,9 +61,9 @@ void on_rw(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadIn
 void clear_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values);
 void alloc_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar);
 void free_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar);
-void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2, bool transitive);
+void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2_full, SigthreadInterval V2_temporal, bool transitive);
 void on_arrive(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V1, bool transitive);
-void on_await(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V2);
+void on_await(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V2_full, SigthreadInterval V2_temporal);
 void begin_no_checking(SyncEnv* p_env);
 void end_no_checking(SyncEnv* p_env);
 

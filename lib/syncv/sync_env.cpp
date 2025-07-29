@@ -134,7 +134,7 @@ struct AssignmentRecordVisNode
 using AssignmentRecordReadNode = AssignmentRecordVisNode<false>;
 using AssignmentRecordMutateNode = AssignmentRecordVisNode<true>;
 
-// Assignment record: 1 write visibility record + collection of read visibility records.
+// Assignment record: collection of mutate visibility records + collection of read visibility records.
 // This is associated for each position (scalar, or value in a tensor)
 // of the program undergoing synchronization validation.
 struct AssignmentRecord
@@ -143,7 +143,7 @@ struct AssignmentRecord
     refcnt_t refcnt = 0;
 
     // TODO update this
-    nodepool::id<MutateVisRecordListNode> write_vis_record_id{0};
+    nodepool::id<AssignmentRecordMutateNode> mutate_vis_records_head_id{0};
 
     // Zero or more read visibility records.
     nodepool::id<AssignmentRecordReadNode> read_vis_records_head_id{0};
@@ -165,7 +165,6 @@ struct BarrierState
     uint32_t arrive_count;
     uint32_t await_count;
     SigthreadInterval arrive_sigthreads;
-    SigthreadInterval await_sigthreads;
 };
 
 template <uint32_t Level> constexpr uint64_t bucket_level_size = 0;
@@ -522,24 +521,27 @@ struct SyncEnv
         extend_free_list(id);
     }
 
+    template <bool IsMutate>
+    void assignment_record_remove_vis_records(nodepool::id<AssignmentRecordVisNode<IsMutate>> head_id)
+    {
+        // Decref visibility records
+        auto id = head_id;
+        while (id) {
+            AssignmentRecordVisNode<IsMutate>& node = get(id);
+            decref(node.vis_record_id);
+            id = node.exospork_next_id;
+        }
+
+        // Free physical storage of linked list
+        extend_free_list(head_id);
+    }
+
     void reset_assignment_record(AssignmentRecord* p_record) noexcept
     {
-        // Decref write visibility record.
-        if (p_record->write_vis_record_id) {
-            decref(p_record->write_vis_record_id);
-            p_record->write_vis_record_id = {};
-        }
+        assignment_record_remove_vis_records(p_record->mutate_vis_records_head_id);
+        p_record->mutate_vis_records_head_id = {};
 
-        // Decref read visibility records.
-        auto read_id = p_record->read_vis_records_head_id;
-        while (read_id) {
-            AssignmentRecordReadNode& node = get(read_id);
-            decref(node.vis_record_id);
-            read_id = node.exospork_next_id;
-        }
-
-        // Free physical storage of read vis record list.
-        extend_free_list(p_record->read_vis_records_head_id);
+        assignment_record_remove_vis_records(p_record->read_vis_records_head_id);
         p_record->read_vis_records_head_id = {};
 
         p_record->assignment_id = 0;
@@ -1369,13 +1371,14 @@ struct SyncEnv
     struct FenceUpdateCommand
     {
         SigthreadInterval V1;
-        SigthreadInterval V2;  // TODO
+        SigthreadInterval V2_full;
+        SigthreadInterval V2_temporal;
 
         template <bool IsMutate>
         void update_for_sync(SyncEnv& env, VisRecord* p_record) const
         {
             if (env.synchronizes_with<Transitive>(*p_record, V1)) {
-                env.union_sigthread_interval(p_record, V2);
+                env.union_sigthread_interval(p_record, IsMutate ? V2_full : V2_temporal);
             }
         };
     };
@@ -1398,7 +1401,8 @@ struct SyncEnv
     struct AwaitUpdateCommand
     {
         SigthreadInterval V1;
-        SigthreadInterval V2;  // TODO
+        SigthreadInterval V2_full;
+        SigthreadInterval V2_temporal;
         pending_await_t await_id;
 
         template <bool IsMutate>
@@ -1406,7 +1410,7 @@ struct SyncEnv
         {
             if (env.remove_pending_await(p_record, await_id)) {
                 assert(env.synchronizes_with<true>(*p_record, V1));
-                env.union_sigthread_interval(p_record, V2);
+                env.union_sigthread_interval(p_record, IsMutate ? V2_full : V2_temporal);
             }
         }
     };
@@ -1479,15 +1483,20 @@ struct SyncEnv
     }
 
     // Augment all visibility records that synchronize with the first visibility set of the fence.
-    void update_vis_records_for_fence(SigthreadInterval V1, SigthreadInterval V2, bool transitive)
+    void update_vis_records_for_fence(
+            SigthreadInterval V1,
+            SigthreadInterval V2_full,
+            SigthreadInterval V2_temporal,
+            bool transitive)
     {
-        V2.bitfield |= SigthreadInterval::sync_bit;  // Augment both V_A and V_S.
+        V2_full.bitfield |= SigthreadInterval::sync_bit;  // Augment both V_A and V_S.
+        V2_temporal.bitfield |= SigthreadInterval::sync_bit;
         if (transitive) {
-            FenceUpdateCommand<true> command{V1, V2};
+            FenceUpdateCommand<true> command{V1, V2_full, V2_temporal};
             update_vis_records_for_sync_impl(command);
         }
         else {
-            FenceUpdateCommand<false> command{V1, V2};
+            FenceUpdateCommand<false> command{V1, V2_full, V2_temporal};
             update_vis_records_for_sync_impl(command);
         }
     }
@@ -1524,9 +1533,15 @@ struct SyncEnv
     // Augment all visibility records with await_id saved.
     // Assumes that V1 matches what was provided for the corresponding arrive.
     // (if this is wrong, we may not update the correct buckets).
-    void update_vis_records_for_await(SigthreadInterval V1, SigthreadInterval V2, pending_await_t await_id)
+    void update_vis_records_for_await(
+            SigthreadInterval V1,
+            SigthreadInterval V2_full,
+            SigthreadInterval V2_temporal,
+            pending_await_t await_id)
     {
-        AwaitUpdateCommand command{V1, V2, await_id};
+        V2_full.bitfield |= SigthreadInterval::sync_bit;  // Augment both V_A and V_S.
+        V2_temporal.bitfield |= SigthreadInterval::sync_bit;
+        AwaitUpdateCommand command{V1, V2_full, V2_temporal, await_id};
         update_vis_records_for_sync_impl(command);
     }
 
@@ -1542,10 +1557,10 @@ struct SyncEnv
 
 
 
-    void on_fence(SigthreadInterval V1, SigthreadInterval V2, bool transitive)
+    void on_fence(SigthreadInterval V1, SigthreadInterval V2_full, SigthreadInterval V2_temporal, bool transitive)
     {
         augment_counter++;
-        update_vis_records_for_fence(V1, V2, transitive);
+        update_vis_records_for_fence(V1, V2_full, V2_temporal, transitive);
     }
 
     void on_arrive(exospork_syncv_barrier_t* bar, SigthreadInterval V1, bool transitive)
@@ -1564,24 +1579,19 @@ struct SyncEnv
         update_vis_records_for_arrive(V1, transitive, await_id);
     }
 
-    void on_await(exospork_syncv_barrier_t* bar, SigthreadInterval V2)
+    void on_await(exospork_syncv_barrier_t* bar, SigthreadInterval V2_full, SigthreadInterval V2_temporal)
     {
         const auto barrier_id = get_barrier_id(bar);
         BarrierState& state = barrier_states[barrier_id];
         const auto await_id = pack_pending_await(barrier_id, state.await_count);
 
-        if (state.await_count++ == 0) {
-            state.await_sigthreads = V2;
-        }
-        else {
-            assert(state.await_sigthreads == V2);  // TODO should not be assertion
-        }
+        state.await_count++;
 
         assert(state.arrive_count >= state.await_count);  // TODO should not be assertion
         const SigthreadInterval V1 = state.arrive_sigthreads;
 
         augment_counter++;
-        update_vis_records_for_await(V1, V2, await_id);
+        update_vis_records_for_await(V1, V2_full, V2_temporal, await_id);
     }
 
 
@@ -1605,29 +1615,34 @@ struct SyncEnv
         for (size_t i = 0; i < N; ++i) {
             AssignmentRecord& assignment_record = lazy_from_api(p_assignment_record_ids + i);
 
-            // Check against previous write visibility record
-            if (assignment_record.write_vis_record_id) {
-                const VisRecord& write_record = remove_forwarding(&assignment_record.write_vis_record_id);
-                assert(visible_to(write_record, accessor_set));  // TODO shouldn't be assert: RAW or WAW
+            // Check against previous mutate visibility records
+            nodepool::id<AssignmentRecordMutateNode> mutate_id = assignment_record.mutate_vis_records_head_id;
+            while (mutate_id) {
+                AssignmentRecordMutateNode& node = get(mutate_id);
+                const VisRecord& mutate_record = remove_forwarding(&node.vis_record_id);
+                assert(visible_to(mutate_record, accessor_set));  // TODO shouldn't be assert: RAW or WAW
+                mutate_id = node.exospork_next_id;
             }
 
-            // If the access is a write, also check against the list of previous read visibility records.
+            // If the access is a mutate, also check against the list of previous read visibility records.
             if constexpr (IsMutate) {
                 nodepool::id<AssignmentRecordReadNode> read_id = assignment_record.read_vis_records_head_id;
                 while (read_id) {
                     AssignmentRecordReadNode& node = get(read_id);
                     const VisRecord& read_record = remove_forwarding(&node.vis_record_id);
                     assert(visible_to(read_record, accessor_set));  // TODO shouldn't be assert: WAR hazard
-                    read_id = get(read_id).exospork_next_id;
+                    read_id = node.exospork_next_id;
                 }
             }
 
-            // Add new visibility record (either as new write visibility record, or appended read visibility record).
+            // Add new visibility record (either as new mutate visibility record, or appended read visibility record).
 
             if constexpr (IsMutate) {
-                // Clear out assignment record on write and add the single write visibility record.
+                // Clear out assignment record on write and add the single mutate visibility record.
+                // TODO this will change for atomic operations.
                 reset_assignment_record(&assignment_record);
-                assignment_record.write_vis_record_id = vis_record_id;
+                AssignmentRecordMutateNode& node = alloc_default_node(&assignment_record.mutate_vis_records_head_id);
+                node.vis_record_id = vis_record_id;
                 assignment_record.assignment_id = assignment_counter;
                 assert(assignment_record.assignment_id != 0);
                 assignment_record.last_augment_counter_bits = augment_counter;
@@ -1853,7 +1868,15 @@ struct SyncEnv
                 return;
             }
             const AssignmentRecord& record = get(id);
-            record_owning(record.write_vis_record_id);
+
+            nodepool::id<AssignmentRecordMutateNode> mutate_id = record.mutate_vis_records_head_id;
+            while (mutate_id) {
+                const AssignmentRecordMutateNode& mutate_node = get(mutate_id);
+                assert(mutate_node.vis_record_id);
+                record_owning(mutate_id);
+                record_owning(mutate_node.vis_record_id);
+                mutate_id = mutate_node.exospork_next_id;
+            }
 
             nodepool::id<AssignmentRecordReadNode> read_id = record.read_vis_records_head_id;
             while (read_id) {
@@ -2092,10 +2115,10 @@ void free_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar)
     INTERFACE_EPILOGUE(p_env)
 }
 
-void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2, bool transitive)
+void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2_full, SigthreadInterval V2_temporal, bool transitive)
 {
     INTERFACE_PROLOGUE(p_env)
-    p_env->on_fence(V1, V2, transitive);
+    p_env->on_fence(V1, V2_full, V2_temporal, transitive);
     INTERFACE_EPILOGUE(p_env)
 }
 
@@ -2106,10 +2129,10 @@ void on_arrive(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval 
     INTERFACE_EPILOGUE(p_env)
 }
 
-void on_await(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V2)
+void on_await(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V2_full, SigthreadInterval V2_temporal)
 {
     INTERFACE_PROLOGUE(p_env)
-    p_env->on_await(bar, V2);
+    p_env->on_await(bar, V2_full, V2_temporal);
     INTERFACE_EPILOGUE(p_env)
 }
 
