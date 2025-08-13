@@ -55,6 +55,7 @@ struct VisRecordDebugData
 
 // *** Primary Implemented Interface ***
 SyncEnv* new_sync_env(const exospork_syncv_init_t& init);
+SyncEnv* copy_sync_env(const SyncEnv* p_env);
 void delete_sync_env(SyncEnv* p_env);
 void on_r(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set);
 void on_rw(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set);
@@ -75,6 +76,7 @@ void debug_unregister_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* v
 void debug_get_read_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out);
 void debug_get_mutate_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out);
 void debug_validate_state(SyncEnv* p_env);
+void debug_pre_delete_check(SyncEnv* p_env);
 
 
 struct SyncEnvDeleter

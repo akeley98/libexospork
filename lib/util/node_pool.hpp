@@ -66,11 +66,26 @@ class Pool
     id<ListNode> free_list_head{0};
 
   public:
-    // Move-only type.
     Pool() = default;
     Pool(Pool&&) = default;
     Pool& operator=(Pool&&) = default;
     ~Pool() = default;
+
+    Pool(const Pool& other)
+    {
+        const size_t n_chunks = other.chunks.size();
+        chunks.reserve(n_chunks);
+        for (size_t i = 0; i < n_chunks; ++i) {
+            std::unique_ptr<Chunk> p_new(new Chunk(*other.chunks[i]));
+            chunks.emplace_back(std::move(p_new));
+        }
+        free_list_head = other.free_list_head;
+    };
+
+    Pool& operator=(const Pool& other)
+    {
+        return (*this = Pool(other));
+    };
 
     const ListNode& get(id<ListNode> _id) const noexcept
     {

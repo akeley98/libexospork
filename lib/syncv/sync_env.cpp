@@ -188,6 +188,14 @@ struct IntervalBucketParentPointer
     static_assert(BucketLevel < bucket_level_count);
     uint32_t child_index_in_parent = 0;
     IntervalBucket<IsMutate, BucketLevel + 1>* p_parent = nullptr;
+
+    void update_parent_pointer(
+        const IntervalBucketParentPointer& other, IntervalBucket<IsMutate, BucketLevel + 1>* new_parent)
+    {
+        child_index_in_parent = other.child_index_in_parent;
+        p_parent = new_parent;
+        assert(new_parent);
+    }
 };
 
 template <bool IsMutate>
@@ -220,16 +228,48 @@ struct IntervalBucket : IntervalBucketParentPointer<IsMutate, BucketLevel>
 
     static constexpr uint32_t bucket_level = BucketLevel;
     static constexpr uint32_t child_count = bucket_level_size<BucketLevel> / bucket_level_size<BucketLevel - 1>;
-    std::unique_ptr<IntervalBucket<IsMutate, BucketLevel - 1>> child_interval_buckets[child_count];
+    using child_t = IntervalBucket<IsMutate, BucketLevel - 1>;
+    std::unique_ptr<child_t> child_interval_buckets[child_count];
 
     // Count of non-null pointers in child_interval_buckets.
     uint32_t nonempty_child_count = 0;
 
     // Bucket for this interval.
+    // Note: we don't have to deep copy this because it's just indices into the node pool, which is deep copied.
     nodepool::id<VisRecordListNode<IsMutate>> bucket = {0};
 
     // For making code re-entrant (prevent de-allocation while being visited).
     uint32_t visitor_count = 0;
+
+    IntervalBucket() = default;
+
+    // Deep copy
+    IntervalBucket(const IntervalBucket& other, IntervalBucket<IsMutate, bucket_level + 1>* new_parent)
+    {
+        this->update_parent_pointer(other, new_parent);
+        this->copy_impl(other);
+    };
+
+    IntervalBucket(const IntervalBucket& other)
+    {
+        static_assert(BucketLevel == bucket_level_count - 1, "Non-top-level bucket must have parent pointer");
+        this->copy_impl(other);
+    }
+
+  private:
+    void copy_impl(const IntervalBucket& other)
+    {
+        for (uint32_t i = 0; i < child_count; ++i) {
+            const child_t* p_child = other.child_interval_buckets[i].get();
+            if (p_child) {
+                child_interval_buckets[i].reset(new child_t(*p_child, this));
+            }
+        }
+        nonempty_child_count = other.nonempty_child_count;
+        bucket = other.bucket;
+        visitor_count = other.visitor_count;
+        assert(visitor_count == 0);  // Not sure copying is OK while being traversed.
+    }
 };
 
 template <bool IsMutate>
@@ -243,10 +283,26 @@ struct IntervalBucket<IsMutate, 1> : IntervalBucketParentPointer<IsMutate, 1>
     uint32_t nonempty_child_count = 0;
 
     // Bucket for this interval.
+    // Note: we don't have to deep copy this because it's just indices into the node pool, which is deep copied.
     nodepool::id<VisRecordListNode<IsMutate>> bucket = {0};
 
     // For making code re-entrant (prevent de-allocation while being visited).
     uint32_t visitor_count = 0;
+
+    IntervalBucket() = default;
+
+    // Deep copy
+    IntervalBucket(const IntervalBucket& other, IntervalBucket<IsMutate, bucket_level + 1>* new_parent)
+    {
+        this->update_parent_pointer(other, new_parent);
+        for (uint32_t i = 0; i < child_count; ++i) {
+            child_interval_buckets[i] = other.child_interval_buckets[i];
+        }
+        nonempty_child_count = other.nonempty_child_count;
+        bucket = other.bucket;
+        visitor_count = other.visitor_count;
+        assert(visitor_count == 0);  // Not sure copying is OK while being traversed.
+    }
 };
 
 
@@ -295,6 +351,11 @@ void delete_interval_bucket_if_empty(IntervalBucket<IsMutate, BucketLevel>* p) n
 
 
 // "Everything" struct that implements the synchronization environment.
+//
+// NOTE: do NOT include "back pointers" to the SyncEnv* as that will defeat copying.
+// For the most part this is trivially copyable because of our use of node pools.
+// A linked list can be copied by just copying the node pool -- the IDs (indexing into the pools)
+// remain valid for the copy.
 struct SyncEnv
 {
     // Failure flag
@@ -329,7 +390,7 @@ struct SyncEnv
     uint64_t live_barrier_bits[max_live_barriers / 64] = {0};
     BarrierState barrier_states[max_live_barriers];
 
-    // Memoization table state.
+    // Memoization table state (requires special deep copy support).
     IntervalBucket<false, bucket_level_count - 1> read_top_level_bucket;
     IntervalBucket<true, bucket_level_count - 1> mutate_top_level_bucket;
 
@@ -2070,14 +2131,13 @@ SyncEnv* new_sync_env(const exospork_syncv_init_t& init)
     return p_env;
 }
 
+SyncEnv* copy_sync_env(const SyncEnv* p_env)
+{
+    return new SyncEnv(*p_env);
+}
+
 void delete_sync_env(SyncEnv* p_env)
 {
-    // XXX temporary assert. This could go off due to the user not free-ing their own stuff, which I consider valid
-    // (if suboptimal) usage, since deleting SyncEnv cleans up all physical memory allocations anyway.
-    const bool all_empty = interval_bucket_is_empty(p_env->read_top_level_bucket)
-            && interval_bucket_is_empty(p_env->mutate_top_level_bucket);
-    assert(p_env->failed || all_empty);
-
     delete p_env;
 }
 
@@ -2178,5 +2238,15 @@ void debug_validate_state(SyncEnv* p_env)
 {
     p_env->debug_validate_state();
 }
+
+void debug_pre_delete_check(SyncEnv* p_env)
+{
+    // This could go off due to the user not free-ing their own stuff, which I consider valid
+    // (if suboptimal) usage, since deleting SyncEnv cleans up all physical memory allocations anyway.
+    const bool all_empty = interval_bucket_is_empty(p_env->read_top_level_bucket)
+            && interval_bucket_is_empty(p_env->mutate_top_level_bucket);
+    assert(p_env->failed || all_empty);
+}
+
 
 }  // end namespace

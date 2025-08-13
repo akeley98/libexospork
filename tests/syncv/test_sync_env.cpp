@@ -70,6 +70,10 @@ void test_sync_env()
         debug_validate_state(p_env);
     }
 
+    // Deep copy (unique_ptr deletes original)
+    env_unique_ptr.reset(copy_sync_env(p_env));
+    p_env = env_unique_ptr.get();
+
     if (true) {
         exospork::SigthreadInterval V1{0, warp_count, sig_generic};
         exospork::SigthreadInterval V2{0, warp_count, sig_async};
@@ -106,4 +110,5 @@ void test_sync_env()
     clear_values(p_env, 32 * warp_count, values);
     debug_validate_state(p_env);
     debug_unregister_values(p_env, 32 * warp_count, values);
+    debug_pre_delete_check(p_env);
 }
