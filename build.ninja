@@ -8,12 +8,12 @@ rule link_lib
 rule link_test
   command = c++ $in -L . -o $out
 
-build bin/lib/syncv/syncv.o: cxx lib/syncv/syncv.cpp
 build bin/lib/syncv/sync_env.o: cxx lib/syncv/sync_env.cpp
+build bin/lib/program/grammar.o: cxx lib/program/grammar.cpp
 
 build bin/tests/test_exospork.o: cxx tests/test_exospork.cpp
 build bin/tests/syncv/test_sync_env.o: cxx tests/syncv/test_sync_env.cpp
 
-build bin/libexospork.so: link_lib bin/lib/syncv/syncv.o bin/lib/syncv/sync_env.o
+build bin/libexospork.so: link_lib bin/lib/syncv/sync_env.o bin/lib/program/grammar.o
 
-build bin/test_exospork: link_test bin/tests/test_exospork.o bin/tests/syncv/test_sync_env.o bin/lib/syncv/syncv.o bin/lib/syncv/sync_env.o
+build bin/test_exospork: link_test bin/tests/test_exospork.o bin/tests/syncv/test_sync_env.o bin/lib/syncv/sync_env.o bin/lib/program/grammar.o

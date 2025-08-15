@@ -42,47 +42,6 @@ struct exospork_syncv_barrier_t
     uint32_t data;
 };
 
-void exospork_syncv_init(size_t sizeof_struct,
-                         const exospork_syncv_init_t*);
-
-void exospork_syncv_deinit();
-
-void exospork_syncv_r(int lineno, size_t N, exospork_syncv_value_t* values,
-                      uint32_t tid_lo, uint32_t tid_hi, uint32_t bitfield);
-
-void exospork_syncv_rw(int lineno, size_t N, exospork_syncv_value_t* values,
-                       uint32_t tid_lo, uint32_t tid_hi, uint32_t bitfield);
-
-void exospork_syncv_clear(int lineno, size_t N, exospork_syncv_value_t* values);
-
-void exospork_syncv_alloc_barrier(int lineno, exospork_syncv_barrier_t* bar);
-
-void exospork_syncv_free_barrier(int lineno, exospork_syncv_barrier_t* bar);
-
-void exospork_syncv_fence(
-        int lineno, uint32_t tid_lo, uint32_t tid_hi,
-        uint32_t v1_sigbits, uint32_t v2_full_sigbits, uint32_t v2_temporal_sigbits, int transitive);
-
-void exospork_syncv_arrive(
-        int lineno, exospork_syncv_barrier_t* bar,
-        uint32_t v1_tid_lo, uint32_t v1_tid_hi, uint32_t v1_sigbits,
-        int transitive);
-
-void exospork_syncv_await(
-        int lineno, exospork_syncv_barrier_t* bar,
-        uint32_t v2_tid_lo, uint32_t v2_tid_hi, uint32_t v2_full_sigbits, uint32_t v2_temporal_sigbits);
-
-
-
-// *** Debugging / Testing Backdoors ***
-
-void exospork_syncv_debug_register_values(
-        uint32_t N, exospork_syncv_value_t* values);
-
-void exospork_syncv_debug_unregister_values(
-        uint32_t N, exospork_syncv_value_t* values);
-
-
 
 #ifdef __cplusplus
 }  // extern "C"
