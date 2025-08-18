@@ -15,6 +15,7 @@ void camspork_require_fail(
     catch (...) {
         fprintf(stderr, "Exception while formatting error: %s:%i\n", __FILE__, __LINE__);
     }
+    fprintf(stderr, "%s\n", thread_local_message_ref().c_str());
     throw std::runtime_error("camspork_require_fail");
 }
 

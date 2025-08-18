@@ -71,7 +71,7 @@ class VarSlotEntry
         CAMSPORK_REQUIRE_CMP(extent.size(), ==, size_t(end - begin), "wrong index count used to read VarSlotEntry");
         size_t linear_idx = 0;
         for (IdxIterator iter = begin ; iter != end; ++iter) {
-            const auto dim = end - begin;
+            const auto dim = iter - begin;
             const size_t idx = *iter;
             CAMSPORK_REQUIRE_CMP(idx, <, extent[dim], "out-of-bounds access in abstract machine program");
             linear_idx = linear_idx * extent[dim] + idx;
@@ -156,22 +156,22 @@ class ProgramEnv
     void alloc_values(Varname name, std::vector<extent_t> extent)
     {
         CAMSPORK_C_BOUNDSCHECK(name.slot, value_env_slots.size());
-        value_env_slots[name.slot] = VarSlotEntry<int32_t>(std::move(extent));
+        value_env_slots[name.slot] = VarSlotEntry<value_t>(std::move(extent));
     }
 
-    void alloc_scalar_value(Varname name, int32_t value)
+    void alloc_scalar_value(Varname name, value_t value)
     {
         CAMSPORK_C_BOUNDSCHECK(name.slot, value_env_slots.size());
-        value_env_slots[name.slot] = VarSlotEntry<int32_t>(value);
+        value_env_slots[name.slot] = VarSlotEntry<value_t>(value);
     }
 
-    VarSlotEntry<int32_t>& value_slot(Varname name)
+    VarSlotEntry<value_t>& value_slot(Varname name)
     {
         CAMSPORK_C_BOUNDSCHECK(name.slot, value_env_slots.size());
         return value_env_slots[name.slot];
     }
 
-    const VarSlotEntry<int32_t>& value_slot(Varname name) const
+    const VarSlotEntry<value_t>& value_slot(Varname name) const
     {
         CAMSPORK_C_BOUNDSCHECK(name.slot, value_env_slots.size());
         return value_env_slots[name.slot];

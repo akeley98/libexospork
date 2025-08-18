@@ -119,12 +119,6 @@ class ProgramBuilder
   private:
     void check_not_finished() const;
 
-    // The address of this will change when the nursery grows.
-    ProgramHeader& current_header()
-    {
-        return reinterpret_cast<ProgramHeader&>(*nursery.data());
-    }
-
     template <typename...Args>
     StmtRef append_impl(Args... a);
 

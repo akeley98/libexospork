@@ -3,11 +3,11 @@
 namespace camspork
 {
 
-const uint32_t ProgramHeader::expected_magic_numbers[7 + 32 + 32] = {
+const uint32_t ProgramHeader::expected_magic_numbers[] = {
     0x800A0D0A,
     0x736d6163,
     0x6b726f70,
-    1,  // Format version number
+    2,  // Format version number
     sizeof(ProgramHeader),
     sizeof(VarConfig),
     sizeof(VarConfigTable),
@@ -75,6 +75,7 @@ const uint32_t ProgramHeader::expected_magic_numbers[7 + 32 + 32] = {
     sizeof(expr<29>),
     sizeof(expr<30>),
     sizeof(expr<31>),
+    0xFFFFFFFF,
 };
 
 const ProgramHeader& ProgramHeader::validate(size_t buffer_size, const char* buffer)

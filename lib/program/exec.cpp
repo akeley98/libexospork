@@ -33,7 +33,7 @@ class ProgramExec
 
         intptr_t operator-(ExprIterator other) const
         {
-            return other.p_node_ref - p_node_ref;
+            return p_node_ref - other.p_node_ref;
         }
 
         ExprIterator operator+(intptr_t i) const
@@ -83,7 +83,7 @@ class ProgramExec
         std::vector<extent_t> extent;
         extent.reserve(e_end - e_begin);
         for (ExprIterator e = e_begin; e != e_end; ++e) {
-            extent.push_back(*e);
+            extent.push_back(extent_t(*e));
         }
         return extent;
     }

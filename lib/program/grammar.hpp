@@ -282,7 +282,7 @@ class NodeNursery
   private:
     void reserve_bytes(size_t bytes)
     {
-        if (bytes < nursery_capacity) {
+        if (bytes > nursery_capacity) {
             // Note: realloc is potentially massively more efficient than C++ due to page remapping.
             bytes = (bytes + 4095) & ~size_t(4095);
             char* p_new = static_cast<char*>(realloc(p_nursery_data, bytes));
@@ -632,9 +632,9 @@ static_assert(NumStmtTypes == 20);
 // ******************************************************************************************
 struct ProgramHeader
 {
-    static const uint32_t expected_magic_numbers[7 + 32 + 32];
+    static const uint32_t expected_magic_numbers[7 + 32 + 32 + 1];
 
-    uint32_t magic_numbers[7 + 32 + 32];
+    uint32_t magic_numbers[7 + 32 + 32 + 1];
     StmtRef top_level_stmt;
     VarConfigTableRef var_config_table;
 

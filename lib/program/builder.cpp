@@ -25,6 +25,9 @@ ProgramBuilder::ProgramBuilder()
         header_template.magic_numbers[&magic - &ProgramHeader::expected_magic_numbers[0]] = magic;
     }
     nursery.add_blob(sizeof header_template, &header_template);
+
+    // Top-level BodyBuilder is special; we never pop it, and it is for building the top-level stmt body.
+    body_stack.push_back({this, {}, {}});
 }
 
 void ProgramBuilder::finish()
@@ -90,6 +93,11 @@ StmtRef ProgramBuilder::add_ValueEnvAlloc(Varname name, size_t num_dims, const E
 StmtRef ProgramBuilder::push_If(ExprRef cond)
 {
     return push_impl(If{cond, {}, {}});
+}
+
+void ProgramBuilder::begin_orelse()
+{
+    body_stack.back().begin_orelse();
 }
 
 StmtRef ProgramBuilder::push_SeqFor(Varname iter, ExprRef lo, ExprRef hi)
