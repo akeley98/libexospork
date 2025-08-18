@@ -1,5 +1,3 @@
-#include "exospork/syncv.h"
-
 #include "syncv/test_sync_env.hpp"
 
 #include "../lib/program/builder.hpp"
@@ -44,8 +42,8 @@ void Main()
             // Not divisible by 5
             builder.add_MutateValue(fib, 1, &read_iter, binop::Assign, builder.add_USub(read_fib));
             builder.add_MutateValue(fib, 1, &read_iter, binop::Mul, builder.add_Const(10000));
-            builder.begin_orelse();
             // Is divisible by 5
+            builder.begin_orelse();
             builder.add_MutateValue(fib, 1, &read_iter, binop::Div, builder.add_Const(5));
         }
         builder.pop_body();
@@ -71,7 +69,7 @@ void Main()
 
 int main()
 {
-    // test_sync_env();
+    test_sync_env();
     camspork::Main();
     return 0;
 }

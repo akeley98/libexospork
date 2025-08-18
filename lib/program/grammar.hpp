@@ -28,7 +28,6 @@ namespace camspork
 
 // Change or make polymorphic if needed!
 using extent_t = uint32_t;
-using sync_id_t = uint32_t;
 using value_t = int32_t;
 
 enum class binop : uint32_t

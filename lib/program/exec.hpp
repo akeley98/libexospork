@@ -6,8 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "../util/require.hpp"
 #include "grammar.hpp"
+#include "../syncv/syncv_types.hpp"
+#include "../util/require.hpp"
 
 namespace camspork
 {
@@ -32,7 +33,7 @@ class VarSlotEntry
         extent = std::move(extent_arg);
     };
 
-    VarSlotEntry(T scalar_init = 0)
+    VarSlotEntry(T scalar_init = T{})
     {
         p_data = &self_data;
         self_data = scalar_init;
@@ -122,7 +123,7 @@ class VarSlotEntry
 
         other.extent.clear();
         other.p_data = &other.self_data;
-        other.self_data = 0;
+        other.self_data = T{};
     }
 };
 
@@ -133,7 +134,8 @@ class ProgramEnv
     const ProgramHeader& header;  // Validated from p_program_buffer
     std::vector<std::string> variable_names;
     std::vector<VarSlotEntry<value_t>> value_env_slots;
-    std::vector<VarSlotEntry<sync_id_t>> sync_env_slots;
+    std::vector<VarSlotEntry<assignment_record_id>> sync_env_slots;
+    std::vector<VarSlotEntry<barrier_id>> barrier_env_slots;
     value_t task_index = 0;
 
   public:

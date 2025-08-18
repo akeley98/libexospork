@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <vector>
 
-namespace exospork
+namespace camspork
 {
 namespace nodepool
 {
@@ -47,7 +47,7 @@ struct id
 // Each node is referenced by integer index, rather than pointer;
 // the index only refers to nodes as long as the pool hasn't been deleted.
 //
-// ListNode is expected to have an id<ListNode> member named exospork_next_id.
+// ListNode is expected to have an id<ListNode> member named camspork_next_id.
 template <typename ListNode>
 class Pool
 {
@@ -102,7 +102,7 @@ class Pool
     }
 
     // Allocate a new node.
-    // The node is default initialized, including setting exospork_next_id to 0.
+    // The node is default initialized, including setting camspork_next_id to 0.
     ListNode& alloc_default_node(uintptr_t* p_memory_budget, id<ListNode>* out_id)
     {
         if (!free_list_head) {
@@ -128,9 +128,9 @@ class Pool
             // Organize new chunk into the new free list.
             uint32_t id_offset = old_chunk_count * chunk_size + 2;
             for (uint32_t i = 0; i < chunk_size - 1; ++i) {
-                new_chunk.storage[i].exospork_next_id._1_index = id_offset + i;
+                new_chunk.storage[i].camspork_next_id._1_index = id_offset + i;
             }
-            new_chunk.storage[chunk_size - 1].exospork_next_id._1_index = 0;
+            new_chunk.storage[chunk_size - 1].camspork_next_id._1_index = 0;
             free_list_head._1_index = old_chunk_count * chunk_size + 1;
 
             assert(&new_chunk.storage[0] == &get(free_list_head));
@@ -138,10 +138,10 @@ class Pool
         assert(free_list_head);
         id<ListNode> ret = free_list_head;
         ListNode& node = get(ret);
-        free_list_head = node.exospork_next_id;
+        free_list_head = node.camspork_next_id;
 
         node = ListNode{};
-        node.exospork_next_id = id<ListNode>{0};
+        node.camspork_next_id = id<ListNode>{0};
         *out_id = ret;
         return node;
     }
@@ -157,40 +157,40 @@ class Pool
         id<ListNode> tmp_id = head_id;
         while (1) {
             ListNode& node = get(tmp_id);
-            if (node.exospork_next_id) {
-                tmp_id = node.exospork_next_id;
+            if (node.camspork_next_id) {
+                tmp_id = node.camspork_next_id;
             }
             else {
-                node.exospork_next_id = free_list_head;
+                node.camspork_next_id = free_list_head;
                 free_list_head = head_id;
                 return;
             }
         }
     }
 
-    // Given a pointer to the exospork_next_id member of a node,
+    // Given a pointer to the camspork_next_id member of a node,
     // insert the given insert_me node after said node.
     void insert_next_node(id<ListNode>* p_insert_after, id<ListNode> insert_me) noexcept
     {
         assert(p_insert_after);
         ListNode& inserted_node = get(insert_me);
-        assert(!inserted_node.exospork_next_id);
-        inserted_node.exospork_next_id = *p_insert_after;
+        assert(!inserted_node.camspork_next_id);
+        inserted_node.camspork_next_id = *p_insert_after;
         *p_insert_after = insert_me;
     }
 
-    // Given a pointer to the exospork_next_id member of a node,
+    // Given a pointer to the camspork_next_id member of a node,
     // remove the node AFTER said node, and return the removed node.
     //
-    // The returned node automatically has its exospork_next_id nulled,
+    // The returned node automatically has its camspork_next_id nulled,
     // but is not automatically free'd; pass to extend_free_list later.
     [[nodiscard]] id<ListNode> remove_next_node(id<ListNode>* p_id) noexcept
     {
         assert(*p_id);
         const id<ListNode> ret = *p_id;
         ListNode& removed_node = get(ret);
-        *p_id = removed_node.exospork_next_id;
-        removed_node.exospork_next_id._1_index = 0;
+        *p_id = removed_node.camspork_next_id;
+        removed_node.camspork_next_id._1_index = 0;
         return ret;
     };
 
@@ -210,7 +210,7 @@ class Pool
         auto id = free_list_head;
         while (id) {
             p_set->insert(id);
-            id = get(id).exospork_next_id;
+            id = get(id).camspork_next_id;
         }
     }
 };
@@ -221,9 +221,9 @@ class Pool
 namespace std
 {
 template <typename ListNode>
-struct hash<exospork::nodepool::id<ListNode>>
+struct hash<camspork::nodepool::id<ListNode>>
 {
-    size_t operator()(const exospork::nodepool::id<ListNode>& id) const
+    size_t operator()(const camspork::nodepool::id<ListNode>& id) const
     {
         return id._1_index;
     }

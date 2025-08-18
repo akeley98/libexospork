@@ -5,7 +5,7 @@
 
 #include "../util/bit_util.hpp"
 
-namespace exospork
+namespace camspork
 {
 
 // A single sigthread consists (conceptually) of a pair of

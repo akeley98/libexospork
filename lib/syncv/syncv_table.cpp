@@ -1,4 +1,4 @@
-#include "sync_env.hpp"
+#include "syncv_table.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -12,8 +12,7 @@
 #include "sigthread.hpp"
 #include "../util/bit_util.hpp"
 #include "../util/node_pool.hpp"
-
-#include "../../include/exospork/syncv.h"
+#include "../util/require.hpp"
 
 // Maybe replace later
 #include <unordered_map>
@@ -21,7 +20,7 @@
 template <typename K, typename V> using Map = std::unordered_map<K, V>;
 template <typename V> using Set = std::unordered_set<V>;
 
-namespace exospork
+namespace camspork
 {
 
 namespace
@@ -32,7 +31,7 @@ using refcnt_t = uint32_t;
 struct PendingAwaitListNode
 {
     pending_await_t await_id;
-    nodepool::id<PendingAwaitListNode> exospork_next_id;
+    nodepool::id<PendingAwaitListNode> camspork_next_id;
 
     refcnt_t get_refcnt() const
     {
@@ -53,7 +52,7 @@ struct PendingAwaitListNode
 struct SigthreadIntervalListNode
 {
     SigthreadInterval data;
-    nodepool::id<SigthreadIntervalListNode> exospork_next_id;
+    nodepool::id<SigthreadIntervalListNode> camspork_next_id;
 
     refcnt_t get_refcnt() const
     {
@@ -91,10 +90,10 @@ struct VisRecordListNode
 
     // If in base state, this is the next node in the memoization bucket.
     // If in the forwarding state, this is an owning reference to the forwarded-to visibility record.
-    nodepool::id<VisRecordListNode<IsMutate>> exospork_next_id;
+    nodepool::id<VisRecordListNode<IsMutate>> camspork_next_id;
 
     // If the visibility record is in the base state, this is the valid data.
-    // If the visibility record is in the forwarding state, the data is that of the record at get(exospork_next_id).
+    // If the visibility record is in the forwarding state, the data is that of the record at get(camspork_next_id).
     VisRecord base_data;
 
     // Empty visibility set is never valid.
@@ -119,9 +118,9 @@ template <bool IsMutate>
 struct AssignmentRecordVisNode
 {
     // Linked list of read/mutate vis records for an assignment record.
-    // Don't use the exospork_next_id in the VisRecord itself ... that is for the memoization table's usage.
+    // Don't use the camspork_next_id in the VisRecord itself ... that is for the memoization table's usage.
     nodepool::id<VisRecordListNode<IsMutate>> vis_record_id;
-    nodepool::id<AssignmentRecordVisNode<IsMutate>> exospork_next_id;
+    nodepool::id<AssignmentRecordVisNode<IsMutate>> camspork_next_id;
 
     static constexpr bool is_mutate = IsMutate;
 
@@ -139,7 +138,7 @@ using AssignmentRecordMutateNode = AssignmentRecordVisNode<true>;
 // of the program undergoing synchronization validation.
 struct AssignmentRecord
 {
-    nodepool::id<AssignmentRecord> exospork_next_id{0};
+    nodepool::id<AssignmentRecord> camspork_next_id{0};
     refcnt_t refcnt = 0;
 
     // TODO update this
@@ -350,19 +349,22 @@ void delete_interval_bucket_if_empty(IntervalBucket<IsMutate, BucketLevel>* p) n
 
 
 
-// "Everything" struct that implements the synchronization environment.
+// "Everything" struct that implements "backend state" for the synchronization and barrier environments.
+// The environments consist of IDs that index into this table. The reason we have this is the synchronization
+// enviroment defines many "global" operations that potentially modify every visibility record in existence,
+// so we centralize their state here, and optimize these global operations by memoizing identical visibility records.
 //
-// NOTE: do NOT include "back pointers" to the SyncEnv* as that will defeat copying.
+// NOTE: do NOT include "back pointers" to the SyncvTable as that will defeat copying.
 // For the most part this is trivially copyable because of our use of node pools.
 // A linked list can be copied by just copying the node pool -- the IDs (indexing into the pools)
 // remain valid for the copy.
-struct SyncEnv
+struct SyncvTable
 {
     // Failure flag
     // This is to be set upon an exception being thrown through the non-private
     // interface. If this happens, the internal state may be inconsistent, but memory
     // shouldn't be formally leaked since we'll delete the memory pools later anyway.
-    // Ignore all further SyncEnv commands if failed = true.
+    // Ignore all further SyncvTable commands if failed = true.
     bool failed = false;
 
     // Number of times begin_no_checking was called minus end_no_checking.
@@ -395,10 +397,10 @@ struct SyncEnv
     IntervalBucket<true, bucket_level_count - 1> mutate_top_level_bucket;
 
     // Debugging/Testing
-    // Record pointers to registered exospork_syncv_value_t arrays (plus the array sizes).
+    // Record pointers to registered assignment_record_id arrays (plus the array sizes).
     // Ordinarily we rely on the user alone to remember these arrays, but we need to cache them if we are
     // doing consistency checks.
-    Map<exospork_syncv_value_t*, size_t> debug_registered_assignment_records;
+    Map<assignment_record_id*, size_t> debug_registered_assignment_records;
 
     uint64_t debug_assignment_id = 0;
     uint64_t debug_operation_id = 0;
@@ -434,7 +436,7 @@ struct SyncEnv
         return pool.insert_next_node(p_insert_after, insert_me);
     }
 
-    // Given a pointer to the exospork_next_id member of a node in a list,
+    // Given a pointer to the camspork_next_id member of a node in a list,
     // but don't add it to the free chain: the node is returned to the caller.
     template <typename ListNode>
     [[nodiscard]] nodepool::id<ListNode> remove_next_node(nodepool::id<ListNode>* p_id) noexcept
@@ -444,14 +446,14 @@ struct SyncEnv
         return pool.remove_next_node(p_id);
     }
 
-    // Given a pointer to the exospork_next_id member of a node in a list,
+    // Given a pointer to the camspork_next_id member of a node in a list,
     // remove the next node of the list and add its memory to the free chain.
     // This shouldn't be used if the ListNode itself owns stuff.
     template <typename ListNode>
     void remove_and_free_next_node(nodepool::id<ListNode>* p_id) noexcept
     {
         nodepool::id<ListNode> victim_id = remove_next_node(p_id);
-        assert(!get(victim_id).exospork_next_id);  // Should have been removed from list
+        assert(!get(victim_id).camspork_next_id);  // Should have been removed from list
         extend_free_list(victim_id);               // so this free only adds 1 node to free chain.
     }
 
@@ -503,8 +505,8 @@ struct SyncEnv
         AssignmentRecord& node = get(id);
         if (0 == --node.refcnt) {
             reset_assignment_record(&node);
-            next = node.exospork_next_id;
-            node.exospork_next_id._1_index = 0;
+            next = node.camspork_next_id;
+            node.camspork_next_id._1_index = 0;
             extend_free_list(id);
         }
         if (next) {
@@ -533,7 +535,7 @@ struct SyncEnv
             if (node.is_forwarded()) {
                 // Add physical storage of victim visibility record to free chain,
                 // then decref owning reference to forwarded-to visibility record,
-                auto fwd_id = node.exospork_next_id;
+                auto fwd_id = node.camspork_next_id;
                 assert(fwd_id);
                 free_single_vis_record(id);
                 decref(fwd_id);  // Hope for tail call.
@@ -542,13 +544,13 @@ struct SyncEnv
                 // Non-forwarded (base) visibility record must be removed from memoization first.
                 auto memoized_id = remove_memoized(&node);
                 assert(id == memoized_id);
-                assert(get(memoized_id).exospork_next_id == 0);  // Should have been removed from bucket's list.
+                assert(get(memoized_id).camspork_next_id == 0);  // Should have been removed from bucket's list.
                 free_single_vis_record(memoized_id);
             }
         }
     }
 
-    AssignmentRecord& lazy_from_api(exospork_syncv_value_t* p_api_value)
+    AssignmentRecord& lazy_from_api(assignment_record_id* p_api_value)
     {
         nodepool::id<AssignmentRecord> node_id;
         node_id._1_index = p_api_value->node_id;
@@ -578,7 +580,7 @@ struct SyncEnv
         VisRecordListNode<IsMutate>& node = get(id);
         assert(node.refcnt == 0);
         reset_vis_record_data(&node.base_data);
-        node.exospork_next_id = {};  // Avoid freeing entire list.
+        node.camspork_next_id = {};  // Avoid freeing entire list.
         extend_free_list(id);
     }
 
@@ -590,7 +592,7 @@ struct SyncEnv
         while (id) {
             AssignmentRecordVisNode<IsMutate>& node = get(id);
             decref(node.vis_record_id);
-            id = node.exospork_next_id;
+            id = node.camspork_next_id;
         }
 
         // Free physical storage of linked list
@@ -621,7 +623,7 @@ struct SyncEnv
     {
         nodepool::id<PendingAwaitListNode> new_node_id;
         auto& node = alloc_default_node(&new_node_id);
-        assert(!node.exospork_next_id);
+        assert(!node.camspork_next_id);
         node.await_id = await_id;
         insert_next_node(&p->pending_await_list, new_node_id);
     }
@@ -638,7 +640,7 @@ struct SyncEnv
                 remove_and_free_next_node(p_node_id);
                 return true;
             }
-            p_node_id = &node.exospork_next_id;
+            p_node_id = &node.camspork_next_id;
         }
         return false;
     }
@@ -745,7 +747,7 @@ struct SyncEnv
             }
 
             // Now update iteration state (we do this now so the following insertions work)
-            p_id = &next_node.exospork_next_id;
+            p_id = &next_node.camspork_next_id;
             gap_tid_lo = next_node.data.tid_hi;
 
             if (change_needed) {
@@ -762,7 +764,7 @@ struct SyncEnv
                     new_node.data.tid_hi = original_data.tid_hi;
                     new_node.data.bitfield = original_data.bitfield;
                     insert_next_node(p_id, new_node_id);
-                    p_id = &new_node.exospork_next_id;  // Need to point to the real gap (after original_data.tid_hi)
+                    p_id = &new_node.camspork_next_id;  // Need to point to the real gap (after original_data.tid_hi)
                 }
             }
         }
@@ -771,7 +773,7 @@ struct SyncEnv
         // For each "current node", we try to merge it with the next node, if it exists.
         assert(p->visibility_set);
         SigthreadIntervalListNode* p_current_node = &get(p->visibility_set);
-        for (node_id next_id; (next_id = p_current_node->exospork_next_id); ) {
+        for (node_id next_id; (next_id = p_current_node->camspork_next_id); ) {
             SigthreadIntervalListNode* p_next_node = &get(next_id);
 
             SigthreadInterval& current = p_current_node->data;
@@ -783,8 +785,8 @@ struct SyncEnv
             if (current.tid_hi == next.tid_lo && current.bitfield == next.bitfield) {
                 // Merge next node into current node, and remove next node from list.
                 current.tid_hi = next.tid_hi;
-                assert(p_current_node->exospork_next_id == next_id);
-                remove_and_free_next_node(&p_current_node->exospork_next_id);
+                assert(p_current_node->camspork_next_id == next_id);
+                remove_and_free_next_node(&p_current_node->camspork_next_id);
             }
             else {
                 // If not merged, we need to process the next node in the next iteration.
@@ -824,8 +826,8 @@ struct SyncEnv
             while (id_a && id_b) {
                 const SigthreadIntervalListNode& current_a = get(id_a);
                 const SigthreadIntervalListNode& current_b = get(id_b);
-                id_a = current_a.exospork_next_id;
-                id_b = current_b.exospork_next_id;
+                id_a = current_a.camspork_next_id;
+                id_b = current_b.camspork_next_id;
                 assert(!id_a || valid_adjacent(current_a.data, get(id_a).data));
                 assert(!id_b || valid_adjacent(current_b.data, get(id_b).data));
 
@@ -849,8 +851,8 @@ struct SyncEnv
         while (id_a && id_b) {
             const PendingAwaitListNode& current_a = get(id_a);
             const PendingAwaitListNode& current_b = get(id_b);
-            id_a = current_a.exospork_next_id;
-            id_b = current_b.exospork_next_id;
+            id_a = current_a.camspork_next_id;
+            id_b = current_b.camspork_next_id;
 
             if (current_a.await_id != current_b.await_id) {
                 return false;
@@ -875,7 +877,7 @@ struct SyncEnv
 
         // Check if only one interval, and it equals the input interval, with correct original actor signature.
         const SigthreadIntervalListNode& node = get(a.visibility_set);
-        return !node.exospork_next_id
+        return !node.camspork_next_id
                  && node.data == interval
                  && (interval.sigbits() >> a.original_actor_signature == 1u);
     }
@@ -891,7 +893,7 @@ struct SyncEnv
         nodepool::id<SigthreadIntervalListNode> id = vis_record.visibility_set;
         while (id) {
             const SigthreadIntervalListNode& current_node = get(id);
-            id = current_node.exospork_next_id;
+            id = current_node.camspork_next_id;
             assert(!id || valid_adjacent(current_node.data, get(id).data));
 
             if (current_node.data.intersects(access_set, sigbits_mask)) {
@@ -919,11 +921,11 @@ struct SyncEnv
 
 
     // *** Barrier ID Allocation ***
-    // For now exospork_syncv_barrier_t::data only stores the barrier ID number + 1, but this could change.
+    // For now barrier_id::data only stores the barrier ID number + 1, but this could change.
 
 
 
-    uint32_t get_barrier_id(const exospork_syncv_barrier_t* bar)
+    uint32_t get_barrier_id(const barrier_id* bar)
     {
         assert(bar->data != 0);
         const auto id = (bar->data - 1);
@@ -931,46 +933,52 @@ struct SyncEnv
         return uint32_t(id);
     }
 
-    void set_barrier_id(exospork_syncv_barrier_t* bar, uint32_t id)
+    void set_barrier_id(barrier_id* bar, uint32_t id)
     {
         assert(id < max_live_barriers);
         bar->data = id + 1;
     }
 
-    void alloc_barrier(exospork_syncv_barrier_t* bar)
+    void alloc_barriers(size_t N, barrier_id* barriers)
     {
-        assert(bar->data == 0);
         uint32_t barrier_index = ~0u;
+        size_t num_allocated = 0;
+
+        if (N == 0) {
+            return;
+        }
 
         for (uint32_t word_index = 0; word_index < max_live_barriers / 64; ++word_index) {
-            uint64_t negated_bits = ~live_barrier_bits[word_index];
-            if (negated_bits != 0) {
+            uint64_t negated_bits;
+            while ((negated_bits = ~live_barrier_bits[word_index]) != 0) {
+                CAMSPORK_REQUIRE_CMP(barriers[num_allocated].data, ==, 0, "allocated barrier without free");
                 uint8_t bit_index = pop_low_bit_index(&negated_bits);
                 barrier_index = word_index * 64 + bit_index;
-                set_barrier_id(bar, barrier_index);
+                set_barrier_id(&barriers[num_allocated], barrier_index);
                 live_barrier_bits[word_index] = ~negated_bits;
-                break;
+                barrier_states[barrier_index] = {};
+                if (++num_allocated >= N) {
+                    return;
+                }
             }
         }
 
-        if (barrier_index == ~0u) {
-            assert(0);  // TODO should not be assertion
-        }
-
-        barrier_states[barrier_index] = {};
+        CAMSPORK_REQUIRE(false, "Exceeded implementation limit (max number of barriers per program)");
     }
 
-    void free_barrier(exospork_syncv_barrier_t* bar)
+    void free_barriers(size_t N, barrier_id* barriers)
     {
-        const auto barrier_id = get_barrier_id(bar);
-        const BarrierState& state = barrier_states[barrier_id];
-        assert(state.arrive_count == state.await_count);  // TODO should not be assert
+        for (size_t i = 0; i < N; ++i) {
+            const auto barrier_id = get_barrier_id(&barriers[i]);
+            const BarrierState& state = barrier_states[barrier_id];
+            assert(state.arrive_count == state.await_count);  // TODO should not be assert
 
-        uint64_t& word = live_barrier_bits[barrier_id / 64u];
-        const uint64_t bit = uint64_t(1) << (barrier_id & 63u);
-        assert((word & bit));  // Barrier ID was not allocated
-        word &= ~bit;
-        bar->data = 0;
+            uint64_t& word = live_barrier_bits[barrier_id / 64u];
+            const uint64_t bit = uint64_t(1) << (barrier_id & 63u);
+            assert((word & bit));  // Barrier ID was not allocated
+            word &= ~bit;
+            barriers[i].data = 0;
+        }
     }
 
 
@@ -991,7 +999,7 @@ struct SyncEnv
         SigthreadInterval ret = p_node->data;
 
         while (1) {
-            id = p_node->exospork_next_id;
+            id = p_node->camspork_next_id;
             if (!id) {
                 ret.bitfield &= ~ret.sync_bit;
                 ret.assert_valid();
@@ -1025,7 +1033,7 @@ struct SyncEnv
 
         // Resolve the forwarding.
         do {
-            id = p_node->exospork_next_id;
+            id = p_node->camspork_next_id;
             assert(id);
             p_node = &get(id);
             assert(p_node->refcnt != 0);
@@ -1050,7 +1058,7 @@ struct SyncEnv
         assert(p_node->refcnt != 0);
 
         while (p_node->is_forwarded()) {
-            id = p_node->exospork_next_id;
+            id = p_node->camspork_next_id;
             assert(id);
             p_node = &get(id);
             assert(p_node->refcnt != 0);
@@ -1242,7 +1250,7 @@ struct SyncEnv
                 return p_id;
             }
 
-            p_id = &node.exospork_next_id;
+            p_id = &node.camspork_next_id;
         }
         return nullptr;
     }
@@ -1291,7 +1299,7 @@ struct SyncEnv
         else {
             // Add memoized base visibility set entry to bucket of memoization table.
             new_id = alloc_visibility_record<IsMutate>(command.init_interval);
-            assert(!get(new_id).exospork_next_id);
+            assert(!get(new_id).camspork_next_id);
             get(new_id).refcnt = command.added_refcnt;
             assert(!get(new_id).is_forwarded());
             insert_next_node(p_bucket_head, new_id);
@@ -1352,7 +1360,7 @@ struct SyncEnv
 
         FindMemoizedCommand<IsMutate> command{p_node};
         auto bucket_key = minimal_superset_interval(p_node->base_data.visibility_set);
-        return const_cast<SyncEnv*>(this)->for_buckets<IsMutate, BucketProcessType::Find>(bucket_key, command);
+        return const_cast<SyncvTable*>(this)->for_buckets<IsMutate, BucketProcessType::Find>(bucket_key, command);
     }
 
     template <bool IsMutate>
@@ -1388,7 +1396,7 @@ struct SyncEnv
         VisRecordListNode<IsMutate>& node = get(id);
         assert(node.refcnt != 0);
         assert(!node.is_forwarded());
-        assert(!node.exospork_next_id);  // shouldn't be in any linked list (memoization bucket or forwarded?)
+        assert(!node.camspork_next_id);  // shouldn't be in any linked list (memoization bucket or forwarded?)
 
         MemoizeOrForwardCommand<IsMutate> command{id};
         auto bucket_key = minimal_superset_interval(node.base_data.visibility_set);
@@ -1415,7 +1423,7 @@ struct SyncEnv
             assert(fwd_id != command.input_id);  // Trying to memoize something already in the memoization table.
 
             reset_vis_record_data(&input_node.base_data);  // Clear data to put visibility record into forwarding state.
-            input_node.exospork_next_id = fwd_id;
+            input_node.camspork_next_id = fwd_id;
             assert(input_node.is_forwarded());
             incref(fwd_id);  // Forwarding reference is owning.
         }
@@ -1437,7 +1445,7 @@ struct SyncEnv
         SigthreadInterval V2_temporal;
 
         template <bool IsMutate>
-        void update_for_sync(SyncEnv& env, VisRecord* p_record) const
+        void update_for_sync(SyncvTable& env, VisRecord* p_record) const
         {
             if (env.synchronizes_with<Transitive>(*p_record, V1)) {
                 env.union_sigthread_interval(p_record, IsMutate ? V2_full : V2_temporal);
@@ -1452,7 +1460,7 @@ struct SyncEnv
         pending_await_t await_id;
 
         template <bool IsMutate>
-        void update_for_sync(SyncEnv& env, VisRecord* p_record) const
+        void update_for_sync(SyncvTable& env, VisRecord* p_record) const
         {
             if (env.synchronizes_with<Transitive>(*p_record, V1)) {
                 env.add_pending_await(p_record, await_id);
@@ -1468,7 +1476,7 @@ struct SyncEnv
         pending_await_t await_id;
 
         template <bool IsMutate>
-        void update_for_sync(SyncEnv& env, VisRecord* p_record) const
+        void update_for_sync(SyncvTable& env, VisRecord* p_record) const
         {
             if (env.remove_pending_await(p_record, await_id)) {
                 assert(env.synchronizes_with<true>(*p_record, V1));
@@ -1511,19 +1519,19 @@ struct SyncEnv
 
         // This might be really confusing. p_id is a pointer to a node ID.
         // It could be a pointer to the bucket (itself the ID of the head of the bucket node list) or it
-        // could be the pointer to the exospork_next_id member of the PREVIOUS node (relative to current_node).
+        // could be the pointer to the camspork_next_id member of the PREVIOUS node (relative to current_node).
         while (node_id current_node_id = *p_id) {
             // Now temporarily remove the current node from the bucket linked list.
             // ("next_node" reflects the "pointer to previous node" viewpoint explained above).
             // *p_id will now be the ID of the node that formerly was after current_node, which (if not ID = 0)
             // is the node that we should process on the next iteration.
             VisRecordListNode<IsMutate>& current_node = get(remove_next_node(p_id));
-            assert(!current_node.exospork_next_id);// Should have been removed from list.
+            assert(!current_node.camspork_next_id);// Should have been removed from list.
             assert(!current_node.is_forwarded());  // Invalid empty visibility set (forwarding state memoized?)
 
             // Update the visibility record stored in the node.
             command.template update_for_sync<IsMutate>(*this, &current_node.base_data);
-            assert(p_id != &current_node.exospork_next_id);
+            assert(p_id != &current_node.camspork_next_id);
 
             // This is where the node might get re-inserted to the memoization table.
             // *p_id might change value here again, but it's guaranteed p_id doesn't point inside &current_node.
@@ -1539,7 +1547,7 @@ struct SyncEnv
                 // only at the head of buckets. If this assert goes off, the code may still be correct;
                 // this is just a warning-to-self to check that my mental model is correct.
                 assert(p_id == p_bucket_head);
-                p_id = &get(current_node_id).exospork_next_id;
+                p_id = &get(current_node_id).camspork_next_id;
             }
         }
     }
@@ -1625,7 +1633,7 @@ struct SyncEnv
         update_vis_records_for_fence(V1, V2_full, V2_temporal, transitive);
     }
 
-    void on_arrive(exospork_syncv_barrier_t* bar, SigthreadInterval V1, bool transitive)
+    void on_arrive(barrier_id* bar, SigthreadInterval V1, bool transitive)
     {
         const auto barrier_id = get_barrier_id(bar);
         BarrierState& state = barrier_states[barrier_id];
@@ -1641,7 +1649,7 @@ struct SyncEnv
         update_vis_records_for_arrive(V1, transitive, await_id);
     }
 
-    void on_await(exospork_syncv_barrier_t* bar, SigthreadInterval V2_full, SigthreadInterval V2_temporal)
+    void on_await(barrier_id* bar, SigthreadInterval V2_full, SigthreadInterval V2_temporal)
     {
         const auto barrier_id = get_barrier_id(bar);
         BarrierState& state = barrier_states[barrier_id];
@@ -1664,7 +1672,7 @@ struct SyncEnv
 
     template <bool IsMutate>
     void checked_on_access_impl(size_t N,
-                                exospork_syncv_value_t* p_assignment_record_ids,
+                                assignment_record_id* p_assignment_record_ids,
                                 SigthreadInterval accessor_set)
     {
         // We will memoize the new visibility record once
@@ -1683,7 +1691,7 @@ struct SyncEnv
                 AssignmentRecordMutateNode& node = get(mutate_id);
                 const VisRecord& mutate_record = remove_forwarding(&node.vis_record_id);
                 assert(visible_to(mutate_record, accessor_set));  // TODO shouldn't be assert: RAW or WAW
-                mutate_id = node.exospork_next_id;
+                mutate_id = node.camspork_next_id;
             }
 
             // If the access is a mutate, also check against the list of previous read visibility records.
@@ -1693,7 +1701,7 @@ struct SyncEnv
                     AssignmentRecordReadNode& node = get(read_id);
                     const VisRecord& read_record = remove_forwarding(&node.vis_record_id);
                     assert(visible_to(read_record, accessor_set));  // TODO shouldn't be assert: WAR hazard
-                    read_id = node.exospork_next_id;
+                    read_id = node.camspork_next_id;
                 }
             }
 
@@ -1731,25 +1739,25 @@ struct SyncEnv
         }
     }
 
-    void on_r(size_t N, exospork_syncv_value_t* p_assignment_record_ids, SigthreadInterval accessor_set)
+    void on_r(size_t N, assignment_record_id* p_assignment_record_ids, SigthreadInterval accessor_set)
     {
         if (no_checking_counter == 0) {
             checked_on_access_impl<false>(N, p_assignment_record_ids, accessor_set);
         }
     }
 
-    void on_rw(size_t N, exospork_syncv_value_t* p_assignment_record_ids, SigthreadInterval accessor_set)
+    void on_rw(size_t N, assignment_record_id* p_assignment_record_ids, SigthreadInterval accessor_set)
     {
         assignment_counter++;
         if (no_checking_counter == 0) {
             checked_on_access_impl<true>(N, p_assignment_record_ids, accessor_set);
         }
         else {
-            clear_values(N, p_assignment_record_ids);
+            clear_visibility(N, p_assignment_record_ids);
         }
     }
 
-    void clear_values(size_t N, exospork_syncv_value_t* p_assignment_record_ids)
+    void clear_visibility(size_t N, assignment_record_id* p_assignment_record_ids)
     {
         for (size_t i = 0; i < N; ++i) {
             nodepool::id<AssignmentRecord> id{p_assignment_record_ids[i].node_id};
@@ -1771,7 +1779,7 @@ struct SyncEnv
         for (node_id id = p_assignment_record->read_vis_records_head_id; id; ) {
             const AssignmentRecordReadNode node = get(id);
             get(node.vis_record_id).base_data.tmp_is_duplicate = 0;
-            id = node.exospork_next_id;
+            id = node.camspork_next_id;
         }
 
         // Remove duplicates, using remove_forwarding (unique ID iff unique record)
@@ -1787,14 +1795,14 @@ struct SyncEnv
                 // i.e. since we removed the next node, we're ready to process a new next node next iteration.
                 node_id victim_id = remove_next_node(p_read_id);
                 assert(victim_id == next_id);
-                assert(next_node.exospork_next_id == 0);
+                assert(next_node.camspork_next_id == 0);
                 decref(next_node.vis_record_id);
                 extend_free_list(victim_id);
             }
             else {
                 // If next node survives, remember the visibility set ID and move on.
                 is_duplicate = 1;
-                p_read_id = &get(next_id).exospork_next_id;
+                p_read_id = &get(next_id).camspork_next_id;
             }
         }
     }
@@ -1813,7 +1821,7 @@ struct SyncEnv
         while (id) {
             const AssignmentRecordReadNode& node = get(id);
             out->push_back(node.vis_record_id._1_index);
-            id = node.exospork_next_id;
+            id = node.camspork_next_id;
         }
     }
 
@@ -1830,26 +1838,26 @@ struct SyncEnv
         for (nodepool::id<SigthreadIntervalListNode> node_id = record.visibility_set; node_id;) {
             const SigthreadIntervalListNode& node = get(node_id);
             out->visibility_set.push_back(node.data);
-            node_id = node.exospork_next_id;
+            node_id = node.camspork_next_id;
         }
 
         out->pending_await_list.clear();
         for (nodepool::id<PendingAwaitListNode> node_id = record.pending_await_list; node_id; ) {
             const PendingAwaitListNode& node = get(node_id);
             out->pending_await_list.push_back(node.await_id);
-            node_id = node.exospork_next_id;
+            node_id = node.camspork_next_id;
         }
     }
 
-    void debug_register_values(size_t N, exospork_syncv_value_t* values)
+    void debug_register_records(size_t N, assignment_record_id* array)
     {
-        [[maybe_unused]] const bool unique = debug_registered_assignment_records.insert({values, N}).second;
+        [[maybe_unused]] const bool unique = debug_registered_assignment_records.insert({array, N}).second;
         assert(unique);
     }
 
-    void debug_unregister_values(size_t N, exospork_syncv_value_t* values)
+    void debug_unregister_records(size_t N, assignment_record_id* array)
     {
-        auto it = debug_registered_assignment_records.find(values);
+        auto it = debug_registered_assignment_records.find(array);
         assert(it != debug_registered_assignment_records.end());
         assert(N == it->second);
         debug_registered_assignment_records.erase(it);
@@ -1861,13 +1869,13 @@ struct SyncEnv
         std::vector<refcnt_t> refcnts;
         Set<nodepool::id<ListNode>> free_node_ids;
 
-        RefcntDebug(const SyncEnv& self)
+        RefcntDebug(const SyncvTable& self)
           : refcnts(self.debug_node_pool_size<ListNode>())
           , free_node_ids(self.debug_free_node_ids<ListNode>())
         {
         }
 
-        void check_refcnts(const SyncEnv& self)
+        void check_refcnts(const SyncvTable& self)
         {
             for (nodepool::id<ListNode> id{1}; id._1_index <= refcnts.size(); id._1_index++) {
                 const refcnt_t tested_refcnt = self.get(id).get_refcnt();
@@ -1884,8 +1892,8 @@ struct SyncEnv
     };
 
     // Massive function that verifies that the current state is legal.
-    // This only works if all of the user's arrays of exospork_syncv_value_t have been debug registered,
-    // which otherwise is not needed for correct operation of the SyncEnv.
+    // This only works if all of the user's arrays of assignment_record_id have been debug registered,
+    // which otherwise is not needed for correct operation of the SyncvTable.
     void debug_validate_state() const
     {
         std::tuple<
@@ -1937,7 +1945,7 @@ struct SyncEnv
                 assert(mutate_node.vis_record_id);
                 record_owning(mutate_id);
                 record_owning(mutate_node.vis_record_id);
-                mutate_id = mutate_node.exospork_next_id;
+                mutate_id = mutate_node.camspork_next_id;
             }
 
             nodepool::id<AssignmentRecordReadNode> read_id = record.read_vis_records_head_id;
@@ -1946,15 +1954,15 @@ struct SyncEnv
                 assert(read_node.vis_record_id);
                 record_owning(read_id);
                 record_owning(read_node.vis_record_id);
-                read_id = read_node.exospork_next_id;
+                read_id = read_node.camspork_next_id;
             }
-            recurse(record.exospork_next_id, recurse);
+            recurse(record.camspork_next_id, recurse);
         };
 
         // Count ownership references of AssignmentRecord.
         // Further count ownership references from AssignmentRecord to VisRecordListNode, AssignmentRecordVisNode
         for (const auto& array_length_pair : debug_registered_assignment_records) {
-            exospork_syncv_value_t* ptr = array_length_pair.first;
+            assignment_record_id* ptr = array_length_pair.first;
             size_t sz = array_length_pair.second;
 
             for (size_t i = 0; i < sz; ++i) {
@@ -1976,8 +1984,8 @@ struct SyncEnv
             const auto& node = get(id);
 
             if (node.is_forwarded()) {
-                assert(node.exospork_next_id);
-                record_owning(node.exospork_next_id);
+                assert(node.camspork_next_id);
+                record_owning(node.camspork_next_id);
             }
             else {
                 for (nodepool::id<SigthreadIntervalListNode> node_id = node.base_data.visibility_set; node_id; ) {
@@ -1986,7 +1994,7 @@ struct SyncEnv
                     assert(this_node.data.tid_hi > this_node.data.tid_lo);
                     assert(this_node.data.sigbits() != 0);
 
-                    auto next_id = this_node.exospork_next_id;
+                    auto next_id = this_node.camspork_next_id;
                     if (next_id) {
                         SigthreadIntervalListNode next_node = get(next_id);
                         assert(valid_adjacent(this_node.data, next_node.data));
@@ -2000,7 +2008,7 @@ struct SyncEnv
                 for (nodepool::id<PendingAwaitListNode> node_id = node.base_data.pending_await_list; node_id; ) {
                     record_owning(node_id);
                     PendingAwaitListNode node = get(node_id);
-                    node_id = node.exospork_next_id;
+                    node_id = node.camspork_next_id;
                 }
             }
         };
@@ -2035,7 +2043,7 @@ struct SyncEnv
                 const auto& node = get(id);
                 assert(node.refcnt != 0);
                 assert(!node.is_forwarded());
-                id = node.exospork_next_id;
+                id = node.camspork_next_id;
             }
         };
 
@@ -2104,108 +2112,113 @@ struct SyncEnv
 
 
 
-#define INTERFACE_PROLOGUE(p_env) \
+#define INTERFACE_PROLOGUE(table) \
 try { \
-    if (p_env->failed) { \
+    if (table->failed) { \
         return; \
     } \
-    p_env->operation_counter++;
+    table->operation_counter++;
 
-#define INTERFACE_EPILOGUE(p_env) \
+#define INTERFACE_EPILOGUE(table) \
 } \
 catch (...) { \
-    p_env->failed = true; \
+    table->failed = true; \
     throw; \
 } \
-if (p_env->operation_counter == p_env->debug_operation_id) { \
-    p_env->debug_validate_state(); \
+if (table->operation_counter == table->debug_operation_id) { \
+    table->debug_validate_state(); \
 }
 
-SyncEnv* new_sync_env(const exospork_syncv_init_t& init)
+SyncvTable* new_syncv_table(const syncv_init_t& init)
 {
-    SyncEnv* p_env = new SyncEnv;
-    p_env->original_memory_budget = init.memory_budget;
-    p_env->current_memory_budget = init.memory_budget;
-    p_env->debug_assignment_id = init.debug_assignment_id;
-    p_env->debug_operation_id = init.debug_operation_id;
-    return p_env;
+    SyncvTable* table = new SyncvTable;
+    table->original_memory_budget = init.memory_budget;
+    table->current_memory_budget = init.memory_budget;
+    table->debug_assignment_id = init.debug_assignment_id;
+    table->debug_operation_id = init.debug_operation_id;
+    return table;
 }
 
-SyncEnv* copy_sync_env(const SyncEnv* p_env)
+SyncvTable* copy_syncv_table(const SyncvTable* table)
 {
-    return new SyncEnv(*p_env);
+    return new SyncvTable(*table);
 }
 
-void delete_sync_env(SyncEnv* p_env)
+void delete_syncv_table(SyncvTable* table)
 {
-    delete p_env;
+    delete table;
 }
 
-void on_r(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set)
+void SyncvTableDeleter::operator() (SyncvTable* victim) const
 {
-    INTERFACE_PROLOGUE(p_env)
-    p_env->on_r(N, values, accessor_set);
-    INTERFACE_EPILOGUE(p_env)
+    delete victim;
 }
 
-void on_rw(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values, SigthreadInterval accessor_set)
+void on_r(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set)
 {
-    INTERFACE_PROLOGUE(p_env)
-    p_env->on_rw(N, values, accessor_set);
-    INTERFACE_EPILOGUE(p_env)
+    INTERFACE_PROLOGUE(table)
+    table->on_r(N, array, accessor_set);
+    INTERFACE_EPILOGUE(table)
 }
 
-void clear_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values)
+void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set)
 {
-    INTERFACE_PROLOGUE(p_env)
-    p_env->clear_values(N, values);
-    INTERFACE_EPILOGUE(p_env)
+    INTERFACE_PROLOGUE(table)
+    table->on_rw(N, array, accessor_set);
+    INTERFACE_EPILOGUE(table)
 }
 
-void alloc_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar)
+void clear_visibility(SyncvTable* table, size_t N, assignment_record_id* array)
 {
-    INTERFACE_PROLOGUE(p_env)
-    p_env->alloc_barrier(bar);
-    INTERFACE_EPILOGUE(p_env)
+    INTERFACE_PROLOGUE(table)
+    table->clear_visibility(N, array);
+    INTERFACE_EPILOGUE(table)
 }
 
-void free_barrier(SyncEnv* p_env, exospork_syncv_barrier_t* bar)
+void alloc_barriers(SyncvTable* table, size_t N, barrier_id* barriers)
 {
-    INTERFACE_PROLOGUE(p_env)
-    p_env->free_barrier(bar);
-    INTERFACE_EPILOGUE(p_env)
+    INTERFACE_PROLOGUE(table)
+    table->alloc_barriers(N, barriers);
+    INTERFACE_EPILOGUE(table)
 }
 
-void on_fence(SyncEnv* p_env, SigthreadInterval V1, SigthreadInterval V2_full, SigthreadInterval V2_temporal, bool transitive)
+void free_barriers(SyncvTable* table, size_t N, barrier_id* barriers)
 {
-    INTERFACE_PROLOGUE(p_env)
-    p_env->on_fence(V1, V2_full, V2_temporal, transitive);
-    INTERFACE_EPILOGUE(p_env)
+    INTERFACE_PROLOGUE(table)
+    table->free_barriers(N, barriers);
+    INTERFACE_EPILOGUE(table)
 }
 
-void on_arrive(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V1, bool transitive)
+void on_fence(SyncvTable* table, SigthreadInterval V1, SigthreadInterval V2_full, SigthreadInterval V2_temporal, bool transitive)
 {
-    INTERFACE_PROLOGUE(p_env)
-    p_env->on_arrive(bar, V1, transitive);
-    INTERFACE_EPILOGUE(p_env)
+    INTERFACE_PROLOGUE(table)
+    table->on_fence(V1, V2_full, V2_temporal, transitive);
+    INTERFACE_EPILOGUE(table)
 }
 
-void on_await(SyncEnv* p_env, exospork_syncv_barrier_t* bar, SigthreadInterval V2_full, SigthreadInterval V2_temporal)
+void on_arrive(SyncvTable* table, barrier_id* bar, SigthreadInterval V1, bool transitive)
 {
-    INTERFACE_PROLOGUE(p_env)
-    p_env->on_await(bar, V2_full, V2_temporal);
-    INTERFACE_EPILOGUE(p_env)
+    INTERFACE_PROLOGUE(table)
+    table->on_arrive(bar, V1, transitive);
+    INTERFACE_EPILOGUE(table)
 }
 
-void begin_no_checking(SyncEnv* p_env)
+void on_await(SyncvTable* table, barrier_id* bar, SigthreadInterval V2_full, SigthreadInterval V2_temporal)
 {
-    p_env->no_checking_counter++;
+    INTERFACE_PROLOGUE(table)
+    table->on_await(bar, V2_full, V2_temporal);
+    INTERFACE_EPILOGUE(table)
 }
 
-void end_no_checking(SyncEnv* p_env)
+void begin_no_checking(SyncvTable* table)
 {
-    assert(p_env->no_checking_counter);
-    p_env->no_checking_counter--;
+    table->no_checking_counter++;
+}
+
+void end_no_checking(SyncvTable* table)
+{
+    assert(table->no_checking_counter);
+    table->no_checking_counter--;
 }
 
 
@@ -2214,38 +2227,38 @@ void end_no_checking(SyncEnv* p_env)
 
 
 
-void debug_register_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values)
+void debug_register_records(SyncvTable* table, size_t N, assignment_record_id* records)
 {
-    p_env->debug_register_values(N, values);
+    table->debug_register_records(N, records);
 }
 
-void debug_unregister_values(SyncEnv* p_env, size_t N, exospork_syncv_value_t* values)
+void debug_unregister_records(SyncvTable* table, size_t N, assignment_record_id* records)
 {
-    p_env->debug_unregister_values(N, values);
+    table->debug_unregister_records(N, records);
 }
 
-void debug_get_read_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out)
+void debug_get_read_vis_record_data(const SyncvTable* table, uint32_t id, VisRecordDebugData* out)
 {
-    p_env->debug_get_vis_record_data<false>(id, out);
+    table->debug_get_vis_record_data<false>(id, out);
 }
 
-void debug_get_mutate_vis_record_data(const SyncEnv* p_env, uint32_t id, VisRecordDebugData* out)
+void debug_get_mutate_vis_record_data(const SyncvTable* table, uint32_t id, VisRecordDebugData* out)
 {
-    p_env->debug_get_vis_record_data<true>(id, out);
+    table->debug_get_vis_record_data<true>(id, out);
 }
 
-void debug_validate_state(SyncEnv* p_env)
+void debug_validate_state(SyncvTable* table)
 {
-    p_env->debug_validate_state();
+    table->debug_validate_state();
 }
 
-void debug_pre_delete_check(SyncEnv* p_env)
+void debug_pre_delete_check(SyncvTable* table)
 {
     // This could go off due to the user not free-ing their own stuff, which I consider valid
-    // (if suboptimal) usage, since deleting SyncEnv cleans up all physical memory allocations anyway.
-    const bool all_empty = interval_bucket_is_empty(p_env->read_top_level_bucket)
-            && interval_bucket_is_empty(p_env->mutate_top_level_bucket);
-    assert(p_env->failed || all_empty);
+    // (if suboptimal) usage, since deleting SyncvTable cleans up all physical memory allocations anyway.
+    const bool all_empty = interval_bucket_is_empty(table->read_top_level_bucket)
+            && interval_bucket_is_empty(table->mutate_top_level_bucket);
+    assert(table->failed || all_empty);
 }
 
 

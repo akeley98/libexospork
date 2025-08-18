@@ -299,8 +299,10 @@ class ProgramExec
         // Initialize variable tables, then iterate over the variable length array
         // to initialize all the variable names.
         const auto num_slots = table->camspork_vla_size;
+        // TODO use just one vector instead of parallel vectors?
         env.value_env_slots.resize(num_slots);
         env.sync_env_slots.resize(num_slots);
+        env.barrier_env_slots.resize(num_slots);
         env.variable_names.reserve(num_slots);  // Will be emplaced_back below.
         for (uint32_t i = 0; i < num_slots; ++i) {
             VarConfigRef config = node_vla_get(table, i);

@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-namespace exospork
+namespace camspork
 {
 
 inline uint8_t get_low_bit_index(uint32_t n)
