@@ -30,7 +30,16 @@ template <typename LHS, typename RHS>
     throw std::runtime_error("camspork_require_cmp_fail");
 }
 
+[[noreturn]] void camspork_require_fail(
+    const char* file, int line, const char* expr_str, const char* msg);
+
 }
+
+#define CAMSPORK_REQUIRE(expr, msg) do { \
+    if (!(expr)) { \
+        camspork_require_fail(__FILE__, __LINE__, #expr, msg); \
+    } \
+} while (0)
 
 #define CAMSPORK_REQUIRE_CMP(lhs, op, rhs, msg) do { \
     if (!(lhs op rhs)) { \

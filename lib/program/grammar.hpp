@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <type_traits>
 #include <vector>
 
 #include "../util/require.hpp"
@@ -24,6 +25,11 @@
 
 namespace camspork
 {
+
+// Change or make polymorphic if needed!
+using extent_t = uint32_t;
+using sync_id_t = uint32_t;
+using value_t = int32_t;
 
 enum class binop : uint32_t
 {
@@ -47,9 +53,12 @@ enum class binop : uint32_t
 // The program object will be delivered as a flat buffer of char (must be 32-bit aligned)
 // which is easy to serialize to disk, or move across Python/C ABI boundaries.
 //
-// Each node is a struct immediately followed by an optional variable-length array
-// (use either the CAMSPORK_NODE_NO_VLA or CAMSPORK_NODE_VLA_MEMBER macros.
+// Each node is a struct immediately followed by an optional variable-length array.
+// (use either the CAMSPORK_NODE_NO_VLA or CAMSPORK_NODE_VLA_MEMBER macros).
+// This VLA is often used for array indices or extents (sizes).
+//
 // The NodeRef identifies both the type of the node, and its position in the buffer/file.
+// Therefore, it is not possible to dereference a NodeRef without a pointer to the buffer.
 // ******************************************************************************************
 template <template<uint32_t> typename NodeType, uint32_t NumTypes>
 struct NodeRef
@@ -99,14 +108,15 @@ struct NodeRef
     }
 
     // Callable must implement operator()(const NodeType<N>*) for N = 0, 1, ..., NumTypes - 1
-    template <typename Callable>
+    template <typename Callable, typename Char>
     __attribute__((always_inline))
-    auto dispatch(Callable&& callable, size_t buffer_size, const char* buffer) const
+    auto dispatch(Callable&& callable, size_t buffer_size, Char* buffer) const
     {
         // Alignment check
         uintptr_t buffer_address = reinterpret_cast<uintptr_t>(buffer);
         CAMSPORK_C_BOUNDSCHECK(buffer_address % 4, 1);
 
+        char* mutable_buffer = const_cast<char*>(buffer);
         const size_t byte_offset = this->byte_offset();
 
         // NOTE: we pass nodes by pointer to make node_vla_get more safe.
@@ -117,9 +127,14 @@ struct NodeRef
             if constexpr (N < NumTypes) { \
                 using Node = NodeType<N>; \
                 CAMSPORK_C_BOUNDSCHECK(byte_offset + sizeof(Node), buffer_size + 1); \
-                auto p_node = reinterpret_cast<const Node*>(buffer + byte_offset); \
+                auto p_node = reinterpret_cast<Node*>(&mutable_buffer[byte_offset]); \
                 CAMSPORK_C_BOUNDSCHECK(byte_offset + p_node->camspork_total_bytes(), buffer_size + 1); \
-                return callable(p_node); \
+                if constexpr (std::is_const_v<Char>) { \
+                    return callable(const_cast<const Node*>(p_node)); \
+                } \
+                else { \
+                    return callable(p_node); \
+                } \
             } \
             else { \
                 CAMSPORK_C_BOUNDSCHECK(N, NumTypes); \
@@ -185,7 +200,8 @@ const typename Node::camspork_vla_type& node_vla_get_unsafe(const Node* p_node, 
 
 // ******************************************************************************************
 // Binary builder object.
-// Use add_node(...) to write a struct (plus the trailing VLA if it exists) to the binary.
+// Use add_node<NodeRefT>(...) to write a struct (plus the trailing VLA if it exists)
+// to the binary. Unfortunately, the NodeRefT type must be given explicitly.
 // ******************************************************************************************
 class NodeNursery
 {
@@ -203,32 +219,40 @@ class NodeNursery
         free(p_nursery_data);
     }
 
-    template <template<uint32_t> typename NodeType, uint32_t TypeID>
-    NodeRef<NodeType, TypeID>
+    template <typename NodeRefT, template<uint32_t> typename NodeType, uint32_t TypeID>
+    NodeRefT
     add_node(
-        NodeType<TypeID> node,
-        const std::vector<typename NodeType<TypeID>::camspork_vla_type>& vla)
+        NodeType<TypeID> node, size_t vla_size, const typename NodeType<TypeID>::camspork_vla_type* p_vla)
     {
-        node.camspork_vla_size = uint32_t(vla.size());
+        node.camspork_vla_size = uint32_t(vla_size);
+        CAMSPORK_REQUIRE_CMP(node.camspork_vla_size, ==, vla_size, "32-bit overflow in VLA");
         const uint32_t offset = add_blob(sizeof(node), &node);
-        add_blob(node.camspork_vla_bytes(), vla.data());
-        NodeRef<NodeType, TypeID> node_ref;
+        add_blob(node.camspork_vla_bytes(), p_vla);
+        NodeRefT node_ref;
         node_ref.set_type_byte_offset(TypeID, offset);
         return node_ref;
     }
 
-    template <template<uint32_t> typename NodeType, uint32_t TypeID>
-    NodeRef<NodeType, TypeID>
+    template <typename NodeRefT, template<uint32_t> typename NodeType, uint32_t TypeID>
+    NodeRefT
+    add_node(
+        NodeType<TypeID> node, const std::vector<typename NodeType<TypeID>::camspork_vla_type>& vla)
+    {
+        return add_node<NodeRefT>(node, vla.size(), vla.data());
+    }
+
+    template <typename NodeRefT, template<uint32_t> typename NodeType, uint32_t TypeID>
+    NodeRefT
     add_node(NodeType<TypeID> node)
     {
         static_assert(!node.camspork_vla_member, "Need CAMSPORK_NODE_NO_VLA in struct definition");
         const uint32_t offset = add_blob(sizeof(node), &node);
-        NodeRef<NodeType, TypeID> node_ref;
+        NodeRefT node_ref;
         node_ref.set_type_byte_offset(TypeID, offset);
         return node_ref;
     }
 
-    uint32_t add_blob(size_t bytes, const char* p_blob)
+    uint32_t add_blob(size_t bytes, const void* p_blob)
     {
         const uint32_t offset = nursery_size;
         CAMSPORK_REQUIRE_CMP(bytes % 4, ==, 0, "internal error, expected 32 bit alignment");
@@ -245,6 +269,11 @@ class NodeNursery
         return nursery_size;
     }
 
+    char* data()
+    {
+        return p_nursery_data;
+    }
+
     const char* data() const
     {
         return p_nursery_data;
@@ -254,6 +283,7 @@ class NodeNursery
     void reserve_bytes(size_t bytes)
     {
         if (bytes < nursery_capacity) {
+            // Note: realloc is potentially massively more efficient than C++ due to page remapping.
             bytes = (bytes + 4095) & ~size_t(4095);
             char* p_new = static_cast<char*>(realloc(p_nursery_data, bytes));
             if (p_new == nullptr) {
@@ -424,14 +454,14 @@ struct stmt<3> : SyncEnvAccessNode<true, true>
 {
 };
 
-// MutateValue(Varname name, expr rhs, binop op, expr* idx)
+// MutateValue(Varname name, expr* idx, binop op, expr rhs)
 using MutateValue = stmt<4>;
 template<>
 struct stmt<4>
 {
     Varname name;
-    ExprRef rhs;
     binop op;
+    ExprRef rhs;
     CAMSPORK_NODE_VLA_MEMBER(ExprRef)
 };
 
@@ -529,6 +559,7 @@ struct stmt<13>
 };
 
 // If(expr cond, stmt body, stmt orelse)
+static constexpr uint32_t If_ID = 14;
 using If = stmt<14>;
 template<>
 struct stmt<14>
