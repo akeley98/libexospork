@@ -1,5 +1,7 @@
 #include "exec.hpp"
 
+#include <sstream>
+#include <stdio.h>
 #include <utility>
 
 #include "grammar.hpp"
@@ -266,6 +268,11 @@ class ProgramExec
             // Update thread cuboid.
             env.thread_cuboid.offset[dim_idx] = offset_c + i * box_c;
             env.thread_cuboid.box[dim_idx] = box_c;
+
+            if (true) {
+                const char* var_c_name = env.var_slots[node->iter.slot].name.c_str();
+                printf("%s = %i, %s\n", var_c_name, i, (std::stringstream() << env.thread_cuboid).str().c_str());
+            }
 
             // Look up Varslot each time in case the loop body did something bad!
             env.value_slot(node->iter).scalar() = i;

@@ -66,10 +66,82 @@ void fib_program_test()
     }
 }
 
+void threads_program_test()
+{
+    ProgramBuilder builder;
+    const ExprRef _0 = builder.add_Const(0);
+
+    const uint32_t initial_domain[2] = {8, 384};
+    builder.push_ParallelBlock(2, initial_domain);
+    {
+        const Varname task_v = builder.add_variable("task");
+        builder.push_TasksFor(task_v, _0, builder.add_Const(2));
+        {
+            // Loop over warpgroups (all CTAs active)
+            const Varname warpgroup_v = builder.add_variable("warpgroup");
+            builder.push_ThreadsFor(warpgroup_v, _0, builder.add_Const(3), 1, 0, 128);
+            {
+                // Split cluster into 4 x 2 grid of CTAs
+                builder.push_DomainSplit(0, 2);
+                {
+                    // Loop over fast CTA dimension.
+                    const Varname cta_slow_v = builder.add_variable("cta_slow");
+                    const Varname cta_fast_v = builder.add_variable("cta_fast");
+                    builder.push_ThreadsFor(cta_fast_v, _0, builder.add_Const(2), 1, 0, 1);
+                    {
+                        // Loop over slow CTA dimension.
+                        builder.push_ThreadsFor(cta_slow_v, _0, builder.add_Const(4), 0, 0, 1);
+                        {
+                            // Loop over warps in warpgroup
+                            const Varname warp_v = builder.add_variable("warp");
+                            builder.push_ThreadsFor(warp_v, _0, builder.add_Const(4), 2, 0, 32);
+                            {
+                            }
+                            builder.pop_body();
+                        }
+                        builder.pop_body();
+                    }
+                    builder.pop_body();
+                }
+                builder.pop_body();
+            }
+            builder.pop_body();
+
+            // Loop over CTAs linearly.
+            const Varname cta_v = builder.add_variable("cta");
+            const Varname warp_lo_v = builder.add_variable("warp_lo");
+            const Varname warpgroup_hi_v = builder.add_variable("warpgroup_hi");
+            builder.push_ThreadsFor(cta_v, _0, builder.add_Const(8), 0, 0, 1);
+            {
+                // Loop over warps [0, 3]
+                builder.push_ThreadsFor(warp_lo_v, _0, builder.add_Const(4), 1, 0, 32);
+                {
+                }
+                builder.pop_body();
+                // Loop over warpgroups [4, 11]
+                builder.push_ThreadsFor(warpgroup_hi_v, _0, builder.add_Const(2), 1, 128, 128);
+                {
+                }
+                builder.pop_body();
+            }
+            builder.pop_body();
+        }
+        // End tasks loop
+        builder.pop_body();
+    }
+    // End ParallelBlock
+    builder.pop_body();
+
+    builder.finish();
+    ProgramEnv env(builder.size(), builder.data());
+    env.exec();
+}
+
 }
 
 int main()
 {
+    camspork::threads_program_test();
     camspork::test_cuboid_util();
     test_sync_env();
     camspork::fib_program_test();

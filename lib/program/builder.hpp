@@ -107,7 +107,9 @@ class ProgramBuilder
         Varname name, size_t num_idx, const OffsetExtentExpr* idx,
         bool is_mutate, bool is_ooo, qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits);
     StmtRef add_MutateValue(Varname name, size_t num_idx, const ExprRef* idx, binop op, ExprRef rhs);
-    StmtRef add_Fence(qual_bits_t L1_qual_bits, qual_bits_t L2_full_qual_bits, qual_bits_t L2_temporal_qual_bits);
+    StmtRef add_Fence(
+        uint32_t V1_transitive, qual_bits_t L1_qual_bits,
+        qual_bits_t L2_full_qual_bits, qual_bits_t L2_temporal_qual_bits);
     StmtRef add_ValueEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent);
     StmtRef add_SyncEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent);
 

@@ -473,6 +473,7 @@ using Fence = stmt<5>;
 template<>
 struct stmt<5>
 {
+    uint32_t V1_transitive;
     qual_bits_t L1_qual_bits;
     qual_bits_t L2_full_qual_bits;
     qual_bits_t L2_temporal_qual_bits;

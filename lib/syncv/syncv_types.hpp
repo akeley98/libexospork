@@ -75,11 +75,11 @@ Stream&& operator<<(Stream&& s, const ThreadCuboid& cuboid)
     };
     s << "{\"task_index\": " << cuboid.task_index;
     s << ", \"domain\": ";
-    print_list(s, cuboid.domain);
+    print_list(cuboid.domain);
     s << ", \"offset\": ";
-    print_list(s, cuboid.offset);
+    print_list(cuboid.offset);
     s << ", \"box\": ";
-    print_list(s, cuboid.box);
+    print_list(cuboid.box);
     s << "}";
     return static_cast<Stream&&>(s);
 }

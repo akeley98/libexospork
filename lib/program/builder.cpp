@@ -118,14 +118,16 @@ StmtRef ProgramBuilder::add_MutateValue(Varname name, size_t num_idx, const Expr
 }
 
 StmtRef ProgramBuilder::add_Fence(
-    qual_bits_t L1_qual_bits, qual_bits_t L2_full_qual_bits, qual_bits_t L2_temporal_qual_bits)
+    uint32_t V1_transitive, qual_bits_t L1_qual_bits,
+    qual_bits_t L2_full_qual_bits, qual_bits_t L2_temporal_qual_bits)
 {
+    CAMSPORK_REQUIRE_CMP(V1_transitive, <=, 1, "must be bool");
     CAMSPORK_REQUIRE(!(L1_qual_bits & sync_bit), "top bit must not be set");
     CAMSPORK_REQUIRE(!(L2_full_qual_bits & sync_bit), "top bit must not be set");
     CAMSPORK_REQUIRE(!(L2_temporal_qual_bits & sync_bit), "top bit must not be set");
     CAMSPORK_REQUIRE_CMP(L2_full_qual_bits, ==, L2_full_qual_bits & L2_temporal_qual_bits,
                          "L2_full_qual_bits must be a subset of L2_temporal_qual_bits");
-    return append_impl(Fence{L1_qual_bits, L2_full_qual_bits, L2_temporal_qual_bits});
+    return append_impl(Fence{V1_transitive, L1_qual_bits, L2_full_qual_bits, L2_temporal_qual_bits});
 }
 
 StmtRef ProgramBuilder::add_ValueEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent)

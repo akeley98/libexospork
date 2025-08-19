@@ -98,6 +98,21 @@ class VarSlotEntry
         return p_data[0];
     }
 
+    T* data()
+    {
+        return p_data;
+    }
+
+    const T* data() const
+    {
+        return p_data;
+    }
+
+    size_t size() const
+    {
+        return get_alloc_size(extent);
+    }
+
   private:
     static size_t get_alloc_size(const std::vector<extent_t>& extent_arg)
     {
@@ -131,6 +146,7 @@ struct VarSlotEnvs
 {
     std::string name;
     // For this variable name: Value env, Sync env, Barrier env.
+    // Conceptually, this is mapping from indices to data.
     VarSlotEntry<value_t> value;
     VarSlotEntry<assignment_record_id> sync;
     VarSlotEntry<barrier_id> barrier;
