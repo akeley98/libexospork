@@ -414,15 +414,19 @@ static constexpr uint32_t NumStmtTypes = 20;
 
 using StmtRef = NodeRef<stmt, NumStmtTypes>;
 
-template <bool IsOOO, bool IsMutate>
-struct SyncEnvAccessNode
+struct SyncEnvAccessNodeData
 {
-    static constexpr bool is_ooo = IsOOO;
-    static constexpr bool is_mutate = IsMutate;
     Varname name;
     uint32_t initial_qual_bit;
     uint32_t extended_qual_bits;
     CAMSPORK_NODE_VLA_MEMBER(OffsetExtentExpr)
+};
+
+template <bool IsMutate, bool IsOOO>
+struct SyncEnvAccessNode : SyncEnvAccessNodeData
+{
+    static constexpr bool is_mutate = IsMutate;
+    static constexpr bool is_ooo = IsOOO;
 };
 
 // SyncEnvRead(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, expr* offset, expr* extent)
@@ -435,14 +439,14 @@ struct stmt<0> : SyncEnvAccessNode<false, false>
 // SyncEnvReadOOO(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, expr* offset, expr* extent)
 using SyncEnvReadOOO = stmt<1>;
 template <>
-struct stmt<1> : SyncEnvAccessNode<true, false>
+struct stmt<1> : SyncEnvAccessNode<false, true>
 {
 };
 
 // SyncEnvMutate(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, expr* offset, expr* extent)
 using SyncEnvMutate = stmt<2>;
 template <>
-struct stmt<2> : SyncEnvAccessNode<false, true>
+struct stmt<2> : SyncEnvAccessNode<true, false>
 {
 };
 
@@ -592,18 +596,18 @@ struct stmt<16> : BaseForStmt
 {
 };
 
-// ThreadsFor(Varname iter, expr lo, expr hi, int dim_idx, int offset, int box_size, stmt body)
+// ThreadsFor(Varname iter, expr lo, expr hi, int dim_idx, int offset, int box, stmt body)
 using ThreadsFor = stmt<17>;
 template<>
 struct stmt<17> : BaseForStmt
 {
     uint32_t dim_idx;
     uint32_t offset;
-    uint32_t box_size;
+    uint32_t box;
 };
 
-// DomainDefine(stmt body, int* extent)
-using DomainDefine = stmt<18>;
+// ParallelBlock(stmt body, int* domain)
+using ParallelBlock = stmt<18>;
 template<>
 struct stmt<18>
 {
@@ -631,7 +635,7 @@ static_assert(NumStmtTypes == 20);
 // ******************************************************************************************
 struct ProgramHeader
 {
-    static const uint32_t expected_magic_numbers[7 + 32 + 32 + 1];
+    static const uint32_t expected_magic_numbers[];
 
     uint32_t magic_numbers[7 + 32 + 32 + 1];
     StmtRef top_level_stmt;

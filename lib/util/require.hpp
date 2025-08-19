@@ -43,7 +43,7 @@ template <typename LHS, typename RHS>
 } while (0)
 
 #define CAMSPORK_REQUIRE_CMP(lhs, op, rhs, msg) do { \
-    if (!(lhs op rhs)) { \
+    if (!((lhs) op (rhs))) { \
         camspork_require_cmp_fail(__FILE__, __LINE__, lhs, rhs, #lhs, #op, #rhs, msg); \
     } \
 } while (0)

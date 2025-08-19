@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../util/bit_util.hpp"
+#include "syncv_types.hpp"
 
 namespace camspork
 {
@@ -28,7 +29,7 @@ struct SigthreadInterval
     uint32_t bitfield;
 
     // Top bit reserved, other bits used for sigbits.
-    static constexpr uint32_t sync_bit = 0x8000'0000;
+    static constexpr uint32_t sync_bit = ::camspork::sync_bit;
 
     bool async_only() const
     {

@@ -1,5 +1,8 @@
 #include "builder.hpp"
 
+#include "../syncv/syncv_types.hpp"
+#include "../util/require.hpp"
+
 namespace camspork
 {
 
@@ -21,8 +24,8 @@ ProgramBuilder::ProgramBuilder()
 {
     // Start out the generated binary with the ProgramHeader.
     ProgramHeader header_template;
-    for (const uint32_t& magic : ProgramHeader::expected_magic_numbers) {
-        header_template.magic_numbers[&magic - &ProgramHeader::expected_magic_numbers[0]] = magic;
+    for (uint32_t& magic : header_template.magic_numbers) {
+        magic = ProgramHeader::expected_magic_numbers[&magic - &header_template.magic_numbers[0]];
     }
     nursery.add_blob(sizeof header_template, &header_template);
 
@@ -80,14 +83,59 @@ ExprRef ProgramBuilder::add_BinOp(binop op, ExprRef lhs, ExprRef rhs)
     return nursery.add_node<ExprRef>(BinOp{op, lhs, rhs});
 }
 
+StmtRef ProgramBuilder::add_SyncEnvAccess(
+    Varname name, size_t num_idx, const OffsetExtentExpr* idx,
+    bool is_mutate, bool is_ooo, qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits)
+{
+    auto impl = [&] (auto node)
+    {
+        node.name = name;
+        node.initial_qual_bit = initial_qual_bit;
+        node.extended_qual_bits = extended_qual_bits;
+        return append_impl(node, num_idx, idx);
+    };
+    if (is_mutate) {
+        if (is_ooo) {
+            return impl(SyncEnvMutateOOO{});
+        }
+        else {
+            return impl(SyncEnvMutate{});
+        }
+    }
+    else {
+        if (is_ooo) {
+            return impl(SyncEnvReadOOO{});
+        }
+        else {
+            return impl(SyncEnvRead{});
+        }
+    }
+}
+
 StmtRef ProgramBuilder::add_MutateValue(Varname name, size_t num_idx, const ExprRef* idx, binop op, ExprRef rhs)
 {
     return append_impl(MutateValue{name, op, rhs}, num_idx, idx);
 }
 
+StmtRef ProgramBuilder::add_Fence(
+    qual_bits_t L1_qual_bits, qual_bits_t L2_full_qual_bits, qual_bits_t L2_temporal_qual_bits)
+{
+    CAMSPORK_REQUIRE(!(L1_qual_bits & sync_bit), "top bit must not be set");
+    CAMSPORK_REQUIRE(!(L2_full_qual_bits & sync_bit), "top bit must not be set");
+    CAMSPORK_REQUIRE(!(L2_temporal_qual_bits & sync_bit), "top bit must not be set");
+    CAMSPORK_REQUIRE_CMP(L2_full_qual_bits, ==, L2_full_qual_bits & L2_temporal_qual_bits,
+                         "L2_full_qual_bits must be a subset of L2_temporal_qual_bits");
+    return append_impl(Fence{L1_qual_bits, L2_full_qual_bits, L2_temporal_qual_bits});
+}
+
 StmtRef ProgramBuilder::add_ValueEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent)
 {
     return append_impl(ValueEnvAlloc{name}, num_dims, extent);
+}
+
+StmtRef ProgramBuilder::add_SyncEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent)
+{
+    return append_impl(SyncEnvAlloc{name}, num_dims, extent);
 }
 
 StmtRef ProgramBuilder::push_If(ExprRef cond)
@@ -118,6 +166,32 @@ StmtRef ProgramBuilder::push_TasksFor(Varname iter, ExprRef lo, ExprRef hi)
     return push_impl(node);
 }
 
+StmtRef ProgramBuilder::push_ThreadsFor(
+    Varname iter, ExprRef lo, ExprRef hi, uint32_t dim_idx, uint32_t offset, uint32_t box)
+{
+    ThreadsFor node;
+    node.iter = iter;
+    node.lo = lo;
+    node.hi = hi;
+    node.dim_idx = dim_idx;
+    node.offset = offset;
+    node.box = box;
+    return push_impl(node);
+}
+
+StmtRef ProgramBuilder::push_ParallelBlock(size_t dim, const uint32_t* domain)
+{
+    return push_impl(ParallelBlock{}, dim, domain);
+}
+
+StmtRef ProgramBuilder::push_DomainSplit(uint32_t dim_idx, uint32_t split_factor)
+{
+    DomainSplit node;
+    node.dim_idx = dim_idx;
+    node.split_factor = split_factor;
+    return push_impl(node);
+}
+
 void ProgramBuilder::check_not_finished() const
 {
     CAMSPORK_REQUIRE(!is_finished, "Cannot modify program after finish()");
@@ -132,11 +206,11 @@ StmtRef ProgramBuilder::append_impl(Args... a)
     return ref;
 }
 
-template <typename Stmt>
-StmtRef ProgramBuilder::push_impl(Stmt s)
+template <typename...Args>
+StmtRef ProgramBuilder::push_impl(Args... a)
 {
     check_not_finished();
-    StmtRef body_of = nursery.add_node<StmtRef>(s);
+    StmtRef body_of = nursery.add_node<StmtRef>(a...);
     body_stack.back().stmts.push_back(body_of);
     body_stack.push_back({this, body_of, {}});
     return body_of;

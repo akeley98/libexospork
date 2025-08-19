@@ -49,7 +49,7 @@ struct BodyBuilder
     void operator() (SeqFor* node) const { set_body_common(node); }
     void operator() (TasksFor* node) const { set_body_common(node); }
     void operator() (ThreadsFor* node) const { set_body_common(node); }
-    void operator() (DomainDefine* node) const { set_body_common(node); }
+    void operator() (ParallelBlock* node) const { set_body_common(node); }
     void operator() (DomainSplit* node) const { set_body_common(node); }
 
     void begin_orelse();
@@ -103,8 +103,13 @@ class ProgramBuilder
     // ******************************************************************************************
     // Add statements that don't have a body to the program.
     // ******************************************************************************************
+    StmtRef add_SyncEnvAccess(
+        Varname name, size_t num_idx, const OffsetExtentExpr* idx,
+        bool is_mutate, bool is_ooo, qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits);
     StmtRef add_MutateValue(Varname name, size_t num_idx, const ExprRef* idx, binop op, ExprRef rhs);
+    StmtRef add_Fence(qual_bits_t L1_qual_bits, qual_bits_t L2_full_qual_bits, qual_bits_t L2_temporal_qual_bits);
     StmtRef add_ValueEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent);
+    StmtRef add_SyncEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent);
 
     // ******************************************************************************************
     // Add statements with a body to the program.
@@ -115,6 +120,9 @@ class ProgramBuilder
     void begin_orelse();
     StmtRef push_SeqFor(Varname iter, ExprRef lo, ExprRef hi);
     StmtRef push_TasksFor(Varname iter, ExprRef lo, ExprRef hi);
+    StmtRef push_ThreadsFor(Varname iter, ExprRef lo, ExprRef hi, uint32_t dim_idx, uint32_t offset, uint32_t box);
+    StmtRef push_ParallelBlock(size_t dim, const uint32_t* domain);
+    StmtRef push_DomainSplit(uint32_t dim_idx, uint32_t split_factor);
 
   private:
     void check_not_finished() const;
@@ -122,8 +130,8 @@ class ProgramBuilder
     template <typename...Args>
     StmtRef append_impl(Args... a);
 
-    template <typename Stmt>
-    StmtRef push_impl(Stmt s);
+    template <typename...Args>
+    StmtRef push_impl(Args... a);
 
   public:
     void pop_body();

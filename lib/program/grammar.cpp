@@ -78,6 +78,8 @@ const uint32_t ProgramHeader::expected_magic_numbers[] = {
     0xFFFFFFFF,
 };
 
+static_assert(sizeof(ProgramHeader::magic_numbers) == sizeof(ProgramHeader::expected_magic_numbers));
+
 const ProgramHeader& ProgramHeader::validate(size_t buffer_size, const char* buffer)
 {
     CAMSPORK_C_BOUNDSCHECK(sizeof(ProgramHeader), buffer_size + 1);

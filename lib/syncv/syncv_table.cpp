@@ -163,7 +163,7 @@ struct BarrierState
 {
     uint32_t arrive_count;
     uint32_t await_count;
-    SigthreadInterval arrive_sigthreads;
+    SigthreadInterval arrive_sigthreads;  // TODO remove me
 };
 
 template <uint32_t Level> constexpr uint64_t bucket_level_size = 0;
@@ -1726,7 +1726,7 @@ struct SyncvTable
 
                 // If we leave things as-is, read vis records may build up indefinitely for variables that are written
                 // once and read many times. We fix this by removing duplicates; however, this is really expensive,
-                // so we only do it once after each fence or arrive event (synchronization is when memoization kicks
+                // so we only do it once after each fence or await event (synchronization is when memoization kicks
                 // in to potentially allow us to recognize duplicates due to duplicated IDs).
                 const auto old_bits = assignment_record.last_augment_counter_bits;
                 assignment_record.last_augment_counter_bits = augment_counter;

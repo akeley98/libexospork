@@ -7,6 +7,33 @@
 namespace camspork
 {
 
+class SwapThreadCuboid
+{
+    ThreadCuboid saved;
+    ThreadCuboid* p_restore;
+  public:
+    // Sets *p_cuboid = new_cuboid, and restores old value upon destruction.
+    [[nodiscard]] SwapThreadCuboid(ThreadCuboid* p_cuboid, ThreadCuboid new_cuboid)
+    {
+        saved = *p_cuboid;
+        p_restore = p_cuboid;
+        *p_cuboid = new_cuboid;
+    };
+
+    [[nodiscard]] SwapThreadCuboid(ThreadCuboid* p_cuboid)
+    {
+        saved = *p_cuboid;
+        p_restore = p_cuboid;
+    };
+
+    SwapThreadCuboid(SwapThreadCuboid&&) = delete;
+
+    ~SwapThreadCuboid()
+    {
+        *p_restore = saved;
+    }
+};
+
 // Borrowed reference wrapper around ProgramEnv, to implement actual per-node-type execution.
 class ProgramExec
 {
@@ -102,6 +129,7 @@ class ProgramExec
     template <bool IsOOO, bool IsMutate>
     void operator() (const SyncEnvAccessNode<IsOOO, IsMutate>*)
     {
+        CAMSPORK_REQUIRE(0, "TODO: implement SyncEnvAccessNode");
     }
 
     void operator() (const MutateValue* node)
@@ -113,14 +141,17 @@ class ProgramExec
 
     void operator() (const Fence*)
     {
+        CAMSPORK_REQUIRE(0, "TODO: implement Fence");
     }
 
     void operator() (const Arrive*)
     {
+        CAMSPORK_REQUIRE(0, "TODO: implement Arrive");
     }
 
     void operator() (const Await*)
     {
+        CAMSPORK_REQUIRE(0, "TODO: implement Await");
     }
 
     void operator() (const ValueEnvAlloc* node)
@@ -128,20 +159,24 @@ class ProgramExec
         env.value_slot(node->name) = VarSlotEntry<value_t>(eval_extent(node));
     }
 
-    void operator() (const SyncEnvAlloc*)
+    void operator() (const SyncEnvAlloc* node)
     {
+        env.sync_slot(node->name) = VarSlotEntry<assignment_record_id>(eval_extent(node));
     }
 
     void operator() (const SyncEnvFreeShard*)
     {
+        CAMSPORK_REQUIRE(0, "TODO: implement SyncEnvFreeShard");
     }
 
     void operator() (const BarrierEnvAlloc*)
     {
+        CAMSPORK_REQUIRE(0, "TODO: implement BarrierEnvAlloc");
     }
 
     void operator() (const BarrierEnvFree*)
     {
+        CAMSPORK_REQUIRE(0, "TODO: implement BarrierEnvFree");
     }
 
     struct BodyExecImpl
@@ -182,13 +217,12 @@ class ProgramExec
         exec(s);  // Inlined only once
     }
 
-    template <typename Init, typename Step>
-    void exec_for_impl(const BaseForStmt* node, Init&& init, Step&& step)
+    template <typename Step>
+    void exec_for_impl(const BaseForStmt* node, Step&& step)
     {
         const auto lo = eval(node->lo);
         const auto hi = eval(node->hi);
         env.alloc_scalar_value(node->iter, lo);
-        init();
         for (value_t i = lo; i < hi; ++i) {
             // Look up Varslot each time in case the loop body did something bad!
             env.value_slot(node->iter).scalar() = i;
@@ -199,25 +233,117 @@ class ProgramExec
 
     void operator() (const SeqFor* node)
     {
-        exec_for_impl(node, [] {}, [] {});
+        exec_for_impl(node, [] {});
     }
 
     void operator() (const TasksFor* node)
     {
-        value_t* p_task_index = &env.task_index;
-        exec_for_impl(node, [] {}, [p_task_index] {++*p_task_index;});
+        auto* p_task_index = &env.thread_cuboid.task_index;
+        auto step = [p_task_index] {++*p_task_index;};
+        exec_for_impl(node, step);
     }
 
-    void operator() (const ThreadsFor*)
+    void operator() (const ThreadsFor* node)
     {
+        const uint32_t dim_idx = node->dim_idx;
+        const uint32_t offset_c = node->offset;
+        const uint32_t box_c = node->box;
+        const auto lo = eval(node->lo);
+        const auto hi = eval(node->hi);
+        env.alloc_scalar_value(node->iter, lo);
+
+        // This shouldn't hard to change, but just test it quickly if you change this.
+        CAMSPORK_REQUIRE_CMP(lo, ==, 0, "Expected ThreadsFor loop to start from 0 for now");
+
+        // Restores thread cuboid before returning.
+        SwapThreadCuboid swap(&env.thread_cuboid);
+
+        CAMSPORK_REQUIRE_CMP(dim_idx, <, env.thread_cuboid.dim, "ThreadsFor::dim_idx out of range");
+        CAMSPORK_REQUIRE_CMP(offset_c + (hi - lo) * box_c, <=, env.thread_cuboid.box[dim_idx],
+                             "ThreadsFor consumes more threads than exists in the current thread box");
+
+        for (value_t i = lo; i < hi; ++i) {
+            // Update thread cuboid.
+            env.thread_cuboid.offset[dim_idx] = offset_c + i * box_c;
+            env.thread_cuboid.box[dim_idx] = box_c;
+
+            // Look up Varslot each time in case the loop body did something bad!
+            env.value_slot(node->iter).scalar() = i;
+            exec(node->body);
+        }
     }
 
-    void operator() (const DomainDefine*)
+    void operator() (const ParallelBlock* node)
     {
+        ThreadCuboid new_cuboid;
+        const uint32_t dim = node->camspork_vla_size;
+        CAMSPORK_REQUIRE_CMP(dim, <= , ThreadCuboid::max_dim, "implementation limit: domain too big");
+        new_cuboid.dim = dim;
+        for (uint32_t i = 0; i < dim; ++i) {
+            const auto dim_extent = node_vla_get(node, i);
+            new_cuboid.domain[i] = dim_extent;
+            new_cuboid.offset[i] = 0;
+            new_cuboid.box[i] = dim_extent;
+        }
+
+        // Execute body with new thread cuboid, and restore before returning (~SwapThreadCuboid).
+        SwapThreadCuboid swap(&env.thread_cuboid, new_cuboid);
+        exec(node->body);
     }
 
-    void operator() (const DomainSplit*)
+    void operator() (const DomainSplit* node)
     {
+        ThreadCuboid new_cuboid = env.thread_cuboid;
+        const uint32_t split_idx = node->dim_idx;
+        const uint32_t split_factor = node->split_factor;
+        CAMSPORK_REQUIRE_CMP(split_idx, <, new_cuboid.dim, "out-of-range DomainSplit::dim_idx");
+        CAMSPORK_REQUIRE_CMP(split_factor, >=, 1, "invalid DomainSplit::split_factor");
+
+        const uint32_t domain_c = new_cuboid.domain[split_idx];
+        if (domain_c == split_factor || split_factor == 1) {
+            // Unchanged.
+        }
+        else {
+            const uint32_t new_dim = new_cuboid.dim + 1;
+            CAMSPORK_REQUIRE_CMP(new_dim, <=, ThreadCuboid::max_dim, "implementation limit: domain too big");
+            const uint32_t offset_c = new_cuboid.offset[split_idx];
+            const uint32_t box_c = new_cuboid.box[split_idx];
+            CAMSPORK_REQUIRE_CMP(domain_c % split_factor, ==, 0, "Invalid DomainSplit::split_factor for current env");
+            CAMSPORK_REQUIRE_CMP(offset_c % split_factor, ==, 0, "Invalid DomainSplit::split_factor for current env");
+
+            const uint32_t offset_0 = offset_c / split_factor;
+            const uint32_t offset_1 = 0;
+            const uint32_t domain_0 = domain_c / split_factor;
+            const uint32_t domain_1 = split_factor;
+            uint32_t box_0, box_1;
+            if (box_c < domain_c) {
+                box_0 = 1;
+                box_1 = box_c;
+            }
+            else {
+                CAMSPORK_REQUIRE_CMP(box_c % split_factor, ==, 0, "Invalid DomainSplit::split_factor for current env");
+                box_0 = box_c / split_factor;
+                box_1 = split_factor;
+            }
+
+            // Insert new domain/offset/box coordinates in place of the old ones.
+            new_cuboid.dim = new_dim;
+            for (uint32_t dst = new_dim - 1; dst > split_idx; --dst) {
+                new_cuboid.domain[dst] = new_cuboid.domain[dst - 1];
+                new_cuboid.offset[dst] = new_cuboid.offset[dst - 1];
+                new_cuboid.box[dst] = new_cuboid.box[dst - 1];
+            }
+            new_cuboid.domain[split_idx] = domain_0;
+            new_cuboid.domain[split_idx + 1] = domain_1;
+            new_cuboid.offset[split_idx] = offset_0;
+            new_cuboid.offset[split_idx + 1] = offset_1;
+            new_cuboid.box[split_idx] = box_0;
+            new_cuboid.box[split_idx + 1] = box_1;
+        }
+
+        // Execute body with new thread cuboid, and restore before returning (~SwapThreadCuboid).
+        SwapThreadCuboid swap(&env.thread_cuboid, new_cuboid);
+        exec(node->body);
     }
 
     // ******************************************************************************************
@@ -297,13 +423,8 @@ class ProgramExec
     void operator() (const VarConfigTable* table)
     {
         // Initialize variable tables, then iterate over the variable length array
-        // to initialize all the variable names.
+        // to initialize all the variable slots.
         const auto num_slots = table->camspork_vla_size;
-        // TODO use just one vector instead of parallel vectors?
-        env.value_env_slots.resize(num_slots);
-        env.sync_env_slots.resize(num_slots);
-        env.barrier_env_slots.resize(num_slots);
-        env.variable_names.reserve(num_slots);  // Will be emplaced_back below.
         for (uint32_t i = 0; i < num_slots; ++i) {
             VarConfigRef config = node_vla_get(table, i);
             config.dispatch(*this, buffer_size, p_buffer);
@@ -314,7 +435,7 @@ class ProgramExec
     {
         const auto num_bytes = config->camspork_vla_size;
         const char* p_str = &node_vla_get(config, 0);
-        env.variable_names.emplace_back(p_str, p_str + num_bytes);
+        env.var_slots.push_back({std::string(p_str, p_str + num_bytes), {}, {}, {}});
     }
 };
 

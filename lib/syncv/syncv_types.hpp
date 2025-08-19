@@ -3,8 +3,12 @@
 #include <memory>
 #include <stdint.h>
 
+#include "../util/require.hpp"
+
 namespace camspork
 {
+
+constexpr uint32_t sync_bit = 0x8000'0000;
 
 struct assignment_record_id
 {
@@ -37,5 +41,47 @@ struct SyncvTableDeleter
 };
 
 using SyncvTable_unique_ptr = std::unique_ptr<SyncvTable, SyncvTableDeleter>;
+
+struct SigthreadInterval;
+
+struct ThreadCuboid
+{
+    uint32_t task_index = 0;
+    uint32_t dim = 0;
+    static constexpr uint32_t max_dim = 8;
+    uint32_t domain[max_dim];
+    uint32_t offset[max_dim];
+    uint32_t box[max_dim];
+
+    // TODO add TlSigCuboid and replace SigthreadInterval.
+    SigthreadInterval with_timeline(uint32_t bits) const;
+};
+
+template <typename Stream>
+Stream&& operator<<(Stream&& s, const ThreadCuboid& cuboid)
+{
+    CAMSPORK_REQUIRE_CMP(cuboid.dim, <=, cuboid.max_dim, "tried to print ThreadCuboid with too many dimensions");
+    const uint32_t dim = cuboid.dim;
+    auto print_list = [&s, dim] (const uint32_t* p)
+    {
+        s << "[";
+        if (dim > 0) {
+            s << p[0];
+            for (uint32_t i = 1; i < dim; ++i) {
+                s << ", " << p[i];
+            }
+        }
+        s << "]";
+    };
+    s << "{\"task_index\": " << cuboid.task_index;
+    s << ", \"domain\": ";
+    print_list(s, cuboid.domain);
+    s << ", \"offset\": ";
+    print_list(s, cuboid.offset);
+    s << ", \"box\": ";
+    print_list(s, cuboid.box);
+    s << "}";
+    return static_cast<Stream&&>(s);
+}
 
 }
