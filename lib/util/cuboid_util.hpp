@@ -4,6 +4,28 @@
 
 namespace camspork {
 
+// Imagine we have a tensor T whose size is given by the outer_begin and
+// outer_end iterators (i.e. the tensor is (outer_end-outer_begin)-dimensional).
+// Take the set of all positions S = {T[i_0, ... i_N] where
+// offset_begin[n] <= i_n < (offset_begin[n] + inner_begin[n])}
+//
+// If the tensor T is stored in C-order in T_storage, then we need to
+// find intervals such that
+//
+// for (auto interval: intervals) {
+//     for (IntT i = interval.lo, i < interval.hi; ++i) {
+//         T_storage[i];
+//     }
+// }
+//
+// loops over each element in S exactly once.
+//
+// The intervals will:
+//   * not be adjacent (no "redundant" intervals)
+//   * be delivered by calling callback(interval.lo, interval.hi)
+//     in sorted order.
+//
+// An explicit IntT type parameter must be given.
 template <typename IntT, typename Callback, typename OuterIterator, typename OffsetIterator, typename InnerIterator>
 void cuboid_to_intervals(
     Callback&& callback,
