@@ -1,4 +1,5 @@
 #include "syncv/test_sync_env.hpp"
+#include "test_cuboid_util.hpp"
 
 #include "../lib/program/builder.hpp"
 #include "../lib/program/exec.hpp"
@@ -6,7 +7,7 @@
 namespace camspork
 {
 
-void Main()
+void fib_program_test()
 {
     const uint32_t c_fib_size = 20;
     ProgramBuilder builder;
@@ -69,7 +70,8 @@ void Main()
 
 int main()
 {
+    camspork::test_cuboid_util();
     test_sync_env();
-    camspork::Main();
+    camspork::fib_program_test();
     return 0;
 }

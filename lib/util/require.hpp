@@ -20,7 +20,7 @@ template <typename LHS, typename RHS>
         std::stringstream s;
         s << "Failed requirement: " << lhs_name << " " << op << " " << rhs_name;
         s << " (with " << lhs_name << " = " << lhs << "; ";
-        s << rhs_name << " = " << rhs << "; (";
+        s << rhs_name << " = " << rhs << "; ";
         s << msg << " @ " << file << ":" << line << ")";
         thread_local_message_ref() = s.str();
     }
