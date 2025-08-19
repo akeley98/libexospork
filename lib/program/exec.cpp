@@ -248,6 +248,7 @@ class ProgramExec
     void operator() (const ThreadsFor* node)
     {
         const uint32_t dim_idx = node->dim_idx;
+
         const uint32_t offset_c = node->offset;
         const uint32_t box_c = node->box;
         const auto lo = eval(node->lo);
@@ -264,11 +265,10 @@ class ProgramExec
         CAMSPORK_REQUIRE_CMP(offset_c + (hi - lo) * box_c, <=, env.thread_cuboid.box[dim_idx],
                              "ThreadsFor consumes more threads than exists in the current thread box");
 
-        for (value_t i = lo; i < hi; ++i) {
-            // Update thread cuboid.
-            env.thread_cuboid.offset[dim_idx] = offset_c + i * box_c;
-            env.thread_cuboid.box[dim_idx] = box_c;
+        env.thread_cuboid.offset[dim_idx] += offset_c;
+        env.thread_cuboid.box[dim_idx] = box_c;
 
+        for (value_t i = lo; i < hi; ++i) {
             if (true) {
                 const char* var_c_name = env.var_slots[node->iter.slot].name.c_str();
                 printf("%s = %i, %s\n", var_c_name, i, (std::stringstream() << env.thread_cuboid).str().c_str());
@@ -277,6 +277,9 @@ class ProgramExec
             // Look up Varslot each time in case the loop body did something bad!
             env.value_slot(node->iter).scalar() = i;
             exec(node->body);
+
+            // Slide thread box over for the next iteration.
+            env.thread_cuboid.offset[dim_idx] += box_c;
         }
     }
 
