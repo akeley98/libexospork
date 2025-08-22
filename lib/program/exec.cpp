@@ -219,8 +219,7 @@ class ProgramExec
         exec(s);  // Inlined only once
     }
 
-    template <typename Step>
-    void exec_for_impl(const BaseForStmt* node, Step&& step)
+    void operator() (const SeqFor* node)
     {
         const auto lo = eval(node->lo);
         const auto hi = eval(node->hi);
@@ -229,20 +228,20 @@ class ProgramExec
             // Look up Varslot each time in case the loop body did something bad!
             env.value_slot(node->iter).scalar() = i;
             exec(node->body);
-            step();
         }
-    }
-
-    void operator() (const SeqFor* node)
-    {
-        exec_for_impl(node, [] {});
     }
 
     void operator() (const TasksFor* node)
     {
-        auto* p_task_index = &env.thread_cuboid.task_index;
-        auto step = [p_task_index] {++*p_task_index;};
-        exec_for_impl(node, step);
+        const auto lo = eval(node->lo);
+        const auto hi = eval(node->hi);
+        env.alloc_scalar_value(node->iter, lo);
+        for (value_t i = lo; i < hi; ++i) {
+            // Look up Varslot each time in case the loop body did something bad!
+            env.value_slot(node->iter).scalar() = i;
+            exec(node->body);
+            env.thread_cuboid.task_index++;  // XXX ?
+        }
     }
 
     void operator() (const ThreadsFor* node)
@@ -261,12 +260,12 @@ class ProgramExec
         // Restores thread cuboid before returning.
         SwapThreadCuboid swap(&env.thread_cuboid);
 
-        CAMSPORK_REQUIRE_CMP(dim_idx, <, env.thread_cuboid.dim, "ThreadsFor::dim_idx out of range");
-        CAMSPORK_REQUIRE_CMP(offset_c + (hi - lo) * box_c, <=, env.thread_cuboid.box[dim_idx],
+        CAMSPORK_REQUIRE_CMP(dim_idx, <, env.thread_cuboid.dim(), "ThreadsFor::dim_idx out of range");
+        CAMSPORK_REQUIRE_CMP(offset_c + (hi - lo) * box_c, <=, env.thread_cuboid.box()[dim_idx],
                              "ThreadsFor consumes more threads than exists in the current thread box");
 
-        env.thread_cuboid.offset[dim_idx] += offset_c;
-        env.thread_cuboid.box[dim_idx] = box_c;
+        env.thread_cuboid.offset()[dim_idx] += offset_c;
+        env.thread_cuboid.box()[dim_idx] = box_c;
 
         for (value_t i = lo; i < hi; ++i) {
             if (true) {
@@ -279,22 +278,16 @@ class ProgramExec
             exec(node->body);
 
             // Slide thread box over for the next iteration.
-            env.thread_cuboid.offset[dim_idx] += box_c;
+            env.thread_cuboid.offset()[dim_idx] += box_c;
         }
     }
 
     void operator() (const ParallelBlock* node)
     {
-        ThreadCuboid new_cuboid;
         const uint32_t dim = node->camspork_vla_size;
-        CAMSPORK_REQUIRE_CMP(dim, <= , ThreadCuboid::max_dim, "implementation limit: domain too big");
-        new_cuboid.dim = dim;
-        for (uint32_t i = 0; i < dim; ++i) {
-            const auto dim_extent = node_vla_get(node, i);
-            new_cuboid.domain[i] = dim_extent;
-            new_cuboid.offset[i] = 0;
-            new_cuboid.box[i] = dim_extent;
-        }
+        const uint32_t* begin_dims = &node_vla_get_unsafe(node, 0);
+        const uint32_t* end_dims = &node_vla_get_unsafe(node, dim);
+        const ThreadCuboid new_cuboid = ThreadCuboid::full(begin_dims, end_dims);
 
         // Execute body with new thread cuboid, and restore before returning (~SwapThreadCuboid).
         SwapThreadCuboid swap(&env.thread_cuboid, new_cuboid);
@@ -306,18 +299,16 @@ class ProgramExec
         ThreadCuboid new_cuboid = env.thread_cuboid;
         const uint32_t split_idx = node->dim_idx;
         const uint32_t split_factor = node->split_factor;
-        CAMSPORK_REQUIRE_CMP(split_idx, <, new_cuboid.dim, "out-of-range DomainSplit::dim_idx");
+        CAMSPORK_REQUIRE_CMP(split_idx, <, new_cuboid.dim(), "out-of-range DomainSplit::dim_idx");
         CAMSPORK_REQUIRE_CMP(split_factor, >=, 1, "invalid DomainSplit::split_factor");
 
-        const uint32_t domain_c = new_cuboid.domain[split_idx];
+        const uint32_t domain_c = new_cuboid.domain()[split_idx];
         if (domain_c == split_factor || split_factor == 1) {
             // Unchanged.
         }
         else {
-            const uint32_t new_dim = new_cuboid.dim + 1;
-            CAMSPORK_REQUIRE_CMP(new_dim, <=, ThreadCuboid::max_dim, "implementation limit: domain too big");
-            const uint32_t offset_c = new_cuboid.offset[split_idx];
-            const uint32_t box_c = new_cuboid.box[split_idx];
+            const uint32_t offset_c = new_cuboid.offset()[split_idx];
+            const uint32_t box_c = new_cuboid.box()[split_idx];
             CAMSPORK_REQUIRE_CMP(domain_c % split_factor, ==, 0, "Invalid DomainSplit::split_factor for current env");
             CAMSPORK_REQUIRE_CMP(offset_c % split_factor, ==, 0, "Invalid DomainSplit::split_factor for current env");
 
@@ -337,18 +328,7 @@ class ProgramExec
             }
 
             // Insert new domain/offset/box coordinates in place of the old ones.
-            new_cuboid.dim = new_dim;
-            for (uint32_t dst = new_dim - 1; dst > split_idx; --dst) {
-                new_cuboid.domain[dst] = new_cuboid.domain[dst - 1];
-                new_cuboid.offset[dst] = new_cuboid.offset[dst - 1];
-                new_cuboid.box[dst] = new_cuboid.box[dst - 1];
-            }
-            new_cuboid.domain[split_idx] = domain_0;
-            new_cuboid.domain[split_idx + 1] = domain_1;
-            new_cuboid.offset[split_idx] = offset_0;
-            new_cuboid.offset[split_idx + 1] = offset_1;
-            new_cuboid.box[split_idx] = box_0;
-            new_cuboid.box[split_idx + 1] = box_1;
+            new_cuboid.split_replace(split_idx, domain_0, domain_1, offset_0, offset_1, box_0, box_1);
         }
 
         // Execute body with new thread cuboid, and restore before returning (~SwapThreadCuboid).
@@ -451,10 +431,13 @@ class ProgramExec
 
 
 
+static const uint32_t static_uint32_max = UINT32_MAX;
+
 ProgramEnv::ProgramEnv(size_t buffer_size, const char* buffer)
   : program_buffer_size(buffer_size)
   , p_program_buffer(make_shared_program_buffer(buffer_size, buffer))
   , header(ProgramHeader::validate(buffer_size, p_program_buffer.get()))
+  , thread_cuboid(ThreadCuboid::full(&static_uint32_max, 1 + &static_uint32_max))
 {
     ProgramExec(this).init_vars(header.var_config_table);
 };

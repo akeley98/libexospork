@@ -157,8 +157,8 @@ class ProgramEnv
     size_t program_buffer_size;
     std::shared_ptr<char[]> p_program_buffer;
     const ProgramHeader& header;  // Validated from p_program_buffer
-    std::vector<VarSlotEnvs> var_slots;
     ThreadCuboid thread_cuboid;
+    std::vector<VarSlotEnvs> var_slots;
 
   public:
     friend class ProgramExec;
