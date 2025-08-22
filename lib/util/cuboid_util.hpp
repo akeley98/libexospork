@@ -28,10 +28,10 @@ namespace camspork {
 // An explicit IntT type parameter must be given.
 template <typename IntT, typename Callback, typename OuterIterator, typename OffsetIterator, typename InnerIterator>
 void cuboid_to_intervals(
-    Callback&& callback,
     OuterIterator outer_begin, OuterIterator outer_end,
     OffsetIterator offset_begin, OffsetIterator offset_end,
-    InnerIterator inner_begin, InnerIterator inner_end)
+    InnerIterator inner_begin, InnerIterator inner_end,
+    Callback&& callback)
 {
     const auto dim = outer_end - outer_begin;
     CAMSPORK_REQUIRE_CMP(dim, ==, offset_end - offset_begin, "mismatched dimensions");

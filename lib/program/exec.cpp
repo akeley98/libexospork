@@ -2,9 +2,11 @@
 
 #include <sstream>
 #include <stdio.h>
+#include <type_traits>
 #include <utility>
 
 #include "grammar.hpp"
+#include "../util/cuboid_util.hpp"
 
 namespace camspork
 {
@@ -42,6 +44,9 @@ class ProgramExec
     size_t buffer_size;
     const char* p_buffer;
     ProgramEnv& env;
+
+    std::vector<extent_t> tmp_extent;
+    std::vector<extent_t> tmp_offset;
 
   public:
     ProgramExec(ProgramEnv* p_self)
@@ -104,18 +109,33 @@ class ProgramExec
         return expr_vla_begin(node) + node->camspork_vla_size;
     };
 
+    // Evaluate expressions as tuple of extent values and store into tmp_extent.
     template <typename Node>
-    std::vector<extent_t> eval_extent(const Node* node) const
+    void eval_tmp_extent(const Node* node)
     {
-        ExprIterator e_begin = expr_vla_begin(node);
-        ExprIterator e_end = expr_vla_end(node);
-        std::vector<extent_t> extent;
-        extent.reserve(e_end - e_begin);
-        for (ExprIterator e = e_begin; e != e_end; ++e) {
-            extent.push_back(extent_t(*e));
+        const uint32_t dim = node->camspork_vla_size;
+        tmp_extent.resize(dim);
+        for (uint32_t i = 0; i < dim; ++i) {
+            if constexpr (std::is_same_v<typename Node::camspork_vla_type, OffsetExtentExpr>) {
+                tmp_extent[i] = eval(node_vla_get(node, i).extent_e);
+            }
+            else {
+                tmp_extent[i] = eval(node_vla_get(node, i));
+            }
         }
-        return extent;
     }
+
+    // Evaluate ExtentOffsetExpr tuple as tuple of offset values and store into tmp_offset.
+    template <typename Node>
+    void eval_tmp_offset(const Node* node)
+    {
+        const uint32_t dim = node->camspork_vla_size;
+        tmp_offset.resize(dim);
+        for (uint32_t i = 0; i < dim; ++i) {
+            tmp_offset[i] = eval(node_vla_get(node, i).offset_e);
+        }
+    }
+
 
     // ******************************************************************************************
     // EXECUTE STATEMENT
@@ -129,9 +149,33 @@ class ProgramExec
     }
 
     template <bool IsOOO, bool IsMutate>
-    void operator() (const SyncEnvAccessNode<IsOOO, IsMutate>*)
+    void operator() (const SyncEnvAccessNode<IsOOO, IsMutate>* node)
     {
-        CAMSPORK_REQUIRE(0, "TODO: implement SyncEnvAccessNode");
+        VarSlotEntry<assignment_record_id>& slot = env.sync_slot(node->name);
+        eval_tmp_extent(node);
+        eval_tmp_offset(node);
+
+        // TODO cuboid_to_intervals should move into the syncv_table implementation.
+        cuboid_to_intervals<size_t>(
+            slot.extent().begin(), slot.extent().end(),
+            tmp_offset.begin(), tmp_offset.end(),
+            tmp_extent.begin(), tmp_extent.end(),
+            [&] (size_t lo, size_t hi)
+            {
+                CAMSPORK_REQUIRE_CMP(node->initial_qual_bit, ==, node->extended_qual_bits, "TODO");
+                uint32_t bitfield = node->initial_qual_bit;
+                if (!IsOOO) {
+                    bitfield |= sync_bit;
+                }
+                const auto& tl_input = env.thread_cuboid.with_timeline(bitfield);
+                if constexpr (IsMutate) {
+                    on_rw(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
+                }
+                else {
+                    on_r(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
+                }
+            }
+        );
     }
 
     void operator() (const MutateValue* node)
@@ -141,9 +185,14 @@ class ProgramExec
         lhs = eval_binop(node->op, lhs, rhs);
     }
 
-    void operator() (const Fence*)
+    void operator() (const Fence* node)
     {
-        CAMSPORK_REQUIRE(0, "TODO: implement Fence");
+        // This whole thing will have to change.
+        // It should take qual_tl* L1, L2_full, L2_temporal, and the thread cuboid.
+        const SigthreadInterval V1 = env.thread_cuboid.with_timeline(node->L1_qual_bits);
+        const SigthreadInterval V2_full = env.thread_cuboid.with_timeline(node->L2_full_qual_bits);
+        const SigthreadInterval V2_temporal = env.thread_cuboid.with_timeline(node->L2_temporal_qual_bits);
+        on_fence(env.p_syncv_table.get(), V1, V2_full, V2_temporal, node->V1_transitive);
     }
 
     void operator() (const Arrive*)
@@ -158,12 +207,27 @@ class ProgramExec
 
     void operator() (const ValueEnvAlloc* node)
     {
-        env.value_slot(node->name) = VarSlotEntry<value_t>(eval_extent(node));
+        VarSlotEntry<value_t>& slot = env.value_slot(node->name);
+        // Resize if needed.
+        eval_tmp_extent(node);
+        if (tmp_extent != slot.extent()) {
+            slot.reset();
+            slot = VarSlotEntry<value_t>(tmp_extent);
+        }
     }
 
     void operator() (const SyncEnvAlloc* node)
     {
-        env.sync_slot(node->name) = VarSlotEntry<assignment_record_id>(eval_extent(node));
+        VarSlotEntry<assignment_record_id>& slot = env.sync_slot(node->name);
+        // Clear every entry.
+        // This is needed to return memory to the syncv table.
+        clear_visibility(env.p_syncv_table.get(), slot.size(), slot.data());
+        // Resize if needed.
+        eval_tmp_extent(node);
+        if (tmp_extent != slot.extent()) {
+            slot.reset();
+            slot = VarSlotEntry<assignment_record_id>(tmp_extent);
+        }
     }
 
     void operator() (const SyncEnvFreeShard*)
@@ -171,14 +235,23 @@ class ProgramExec
         CAMSPORK_REQUIRE(0, "TODO: implement SyncEnvFreeShard");
     }
 
-    void operator() (const BarrierEnvAlloc*)
+    void operator() (const BarrierEnvAlloc* node)
     {
-        CAMSPORK_REQUIRE(0, "TODO: implement BarrierEnvAlloc");
+        VarSlotEntry<barrier_id>& slot = env.barrier_slot(node->name);
+        // This is needed to return memory to the syncv table.
+        free_barriers(env.p_syncv_table.get(), slot.size(), slot.data());
+        // Resize if needed.
+        eval_tmp_extent(node);
+        if (tmp_extent != slot.extent()) {
+            slot.reset();
+            slot = VarSlotEntry<barrier_id>(tmp_extent);
+        }
     }
 
-    void operator() (const BarrierEnvFree*)
+    void operator() (const BarrierEnvFree* node)
     {
-        CAMSPORK_REQUIRE(0, "TODO: implement BarrierEnvFree");
+        VarSlotEntry<barrier_id>& slot = env.barrier_slot(node->name);
+        free_barriers(env.p_syncv_table.get(), slot.size(), slot.data());
     }
 
     struct BodyExecImpl
@@ -430,6 +503,13 @@ class ProgramExec
 };
 
 
+static const syncv_init_t default_table_init
+{
+    "PLACEHOLDER_FILENAME.txt",
+    UINT32_MAX,
+    0,
+    0,
+};
 
 static const uint32_t static_uint32_max = UINT32_MAX;
 
@@ -437,6 +517,7 @@ ProgramEnv::ProgramEnv(size_t buffer_size, const char* buffer)
   : program_buffer_size(buffer_size)
   , p_program_buffer(make_shared_program_buffer(buffer_size, buffer))
   , header(ProgramHeader::validate(buffer_size, p_program_buffer.get()))
+  , p_syncv_table(new_syncv_table(default_table_init))
   , thread_cuboid(ThreadCuboid::full(&static_uint32_max, 1 + &static_uint32_max))
 {
     ProgramExec(this).init_vars(header.var_config_table);

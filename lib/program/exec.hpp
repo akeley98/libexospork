@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "grammar.hpp"
+#include "../syncv/syncv_table.hpp"
 #include "../syncv/syncv_types.hpp"
 #include "../util/require.hpp"
 
@@ -18,7 +19,7 @@ class VarSlotEntry
 {
     T* p_data;
     T self_data;  // p_data = &self_data if of size 1; otherwise heap allocated.
-    std::vector<extent_t> extent;
+    std::vector<extent_t> _extent;
 
   public:
     VarSlotEntry(std::vector<extent_t> extent_arg)
@@ -30,7 +31,7 @@ class VarSlotEntry
         else {
             p_data = new T[alloc_size];
         }
-        extent = std::move(extent_arg);
+        _extent = std::move(extent_arg);
     };
 
     VarSlotEntry(T scalar_init = T{})
@@ -46,10 +47,10 @@ class VarSlotEntry
 
     VarSlotEntry(const VarSlotEntry& other)
     {
-        const size_t alloc_size = get_alloc_size(other.extent);
+        const size_t alloc_size = get_alloc_size(other._extent);
         p_data = other.p_data == &other.self_data ? &self_data : new T[alloc_size];
         memcpy(p_data, other.p_data, alloc_size * sizeof(p_data[0]));
-        extent = other.extent;
+        _extent = other._extent;
     }
 
     VarSlotEntry(VarSlotEntry&& other) noexcept
@@ -64,18 +65,31 @@ class VarSlotEntry
         return *this;
     }
 
+    void reset()
+    {
+        free_if_allocated();
+        p_data = &self_data;
+        _extent.clear();
+        self_data = T{};
+    }
+
+    const std::vector<extent_t>& extent() const
+    {
+        return _extent;
+    }
+
     // C-style multidimensional array indexing.
     // Provide the indices as a [begin, end) iterator pair.
     template <typename IdxIterator>
     T& idx(const IdxIterator begin, const IdxIterator end)
     {
-        CAMSPORK_REQUIRE_CMP(extent.size(), ==, size_t(end - begin), "wrong index count used to read VarSlotEntry");
+        CAMSPORK_REQUIRE_CMP(_extent.size(), ==, size_t(end - begin), "wrong index count used to read VarSlotEntry");
         size_t linear_idx = 0;
         for (IdxIterator iter = begin ; iter != end; ++iter) {
             const auto dim = iter - begin;
             const size_t idx = *iter;
-            CAMSPORK_REQUIRE_CMP(idx, <, extent[dim], "out-of-bounds access in abstract machine program");
-            linear_idx = linear_idx * extent[dim] + idx;
+            CAMSPORK_REQUIRE_CMP(idx, <, _extent[dim], "out-of-bounds access in abstract machine program");
+            linear_idx = linear_idx * _extent[dim] + idx;
         }
         return p_data[linear_idx];
     }
@@ -88,13 +102,13 @@ class VarSlotEntry
 
     T& scalar()
     {
-        CAMSPORK_REQUIRE_CMP(extent.size(), ==, 0, "tried to read tensor VarSlotEntry as scalar");
+        CAMSPORK_REQUIRE_CMP(_extent.size(), ==, 0, "tried to read tensor VarSlotEntry as scalar");
         return p_data[0];
     }
 
     const T& scalar() const
     {
-        CAMSPORK_REQUIRE_CMP(extent.size(), ==, 0, "tried to read tensor VarSlotEntry as scalar");
+        CAMSPORK_REQUIRE_CMP(_extent.size(), ==, 0, "tried to read tensor VarSlotEntry as scalar");
         return p_data[0];
     }
 
@@ -110,7 +124,7 @@ class VarSlotEntry
 
     size_t size() const
     {
-        return get_alloc_size(extent);
+        return get_alloc_size(_extent);
     }
 
   private:
@@ -134,9 +148,9 @@ class VarSlotEntry
     {
         p_data = other.p_data == &other.self_data ? &self_data : other.p_data;
         self_data = other.self_data;
-        extent = std::move(other.extent);
+        _extent = std::move(other._extent);
 
-        other.extent.clear();
+        other._extent.clear();
         other.p_data = &other.self_data;
         other.self_data = T{};
     }
@@ -157,6 +171,7 @@ class ProgramEnv
     size_t program_buffer_size;
     std::shared_ptr<char[]> p_program_buffer;
     const ProgramHeader& header;  // Validated from p_program_buffer
+    SyncvTable_unique_ptr p_syncv_table;
     ThreadCuboid thread_cuboid;
     std::vector<VarSlotEnvs> var_slots;
 
@@ -166,8 +181,9 @@ class ProgramEnv
     ProgramEnv(size_t buffer_size, const char* buffer);
 
     // Currently moves are the same as copies.
-    ProgramEnv(const ProgramEnv&) = default;
-    ProgramEnv& operator=(const ProgramEnv&) = default;
+    // TODO enable this, replace SyncvTable_unique_ptr with pImpl copy.
+    // ProgramEnv(const ProgramEnv&) = default;
+    // ProgramEnv& operator=(const ProgramEnv&) = default;
     ~ProgramEnv() = default;
 
     void exec()

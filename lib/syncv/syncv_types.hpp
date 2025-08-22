@@ -13,6 +13,7 @@ constexpr uint32_t sync_bit = 0x8000'0000;
 struct assignment_record_id
 {
     uint32_t node_id = 0;
+
     operator bool() const
     {
         return node_id != 0;
@@ -22,6 +23,11 @@ struct assignment_record_id
 struct barrier_id
 {
     uint32_t data = 0;
+
+    operator bool() const
+    {
+        return data != 0;
+    }
 };
 
 struct syncv_init_t
@@ -90,8 +96,17 @@ struct ThreadCuboid
         box_data[dim_idx + 1] = box_1;
     }
 
-    // TODO add TlSigCuboid and replace SigthreadInterval.
-    SigthreadInterval with_timeline(uint32_t bits) const;
+    uint32_t domain_num_threads() const
+    {
+        uint32_t prod = 1;
+        for (uint32_t i = 0; i < dim(); ++i) {
+            prod *= domain()[i];
+        }
+        return prod;
+    };
+
+    // TODO add TlSigInput and replace SigthreadInterval.
+    SigthreadInterval with_timeline(uint32_t bitfield) const;
 
     // Initialize (end-begin)-dimensional domain with all threads active
     // i.e. offset = 0, box = domain.

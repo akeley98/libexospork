@@ -11,6 +11,7 @@
 
 #include "sigthread.hpp"
 #include "../util/bit_util.hpp"
+#include "../util/cuboid_util.hpp"
 #include "../util/node_pool.hpp"
 #include "../util/require.hpp"
 
@@ -22,6 +23,30 @@ template <typename V> using Set = std::unordered_set<V>;
 
 namespace camspork
 {
+
+// TODO remove me
+SigthreadInterval ThreadCuboid::with_timeline(uint32_t bitfield) const
+{
+    bool have_result = false;
+    SigthreadInterval result;
+    result.bitfield = bitfield;
+    const uint32_t task_offset = domain_num_threads() * task_index;
+
+    cuboid_to_intervals<uint32_t>(
+        domain(), domain() + dim(),
+        offset(), offset() + dim(),
+        box(), box() + dim(),
+        [&] (uint32_t lo, uint32_t hi)
+        {
+            CAMSPORK_REQUIRE(!have_result, "TODO: implement non-contiguous linearized thread IDs");
+            have_result = true;
+            result.tid_lo = lo + task_offset;
+            result.tid_hi = hi + task_offset;
+        }
+    );
+    CAMSPORK_REQUIRE(have_result, "unexpected empty thread set");
+    return result;
+}
 
 namespace
 {
@@ -367,7 +392,7 @@ struct SyncvTable
     // Ignore all further SyncvTable commands if failed = true.
     bool failed = false;
 
-    // Number of times begin_no_checking was called minus end_no_checking.
+    // Number of times begin_no_checking was called minus end_no_checking. (TODO remove???)
     uint32_t no_checking_counter = 0;
 
     // Counters for operations
@@ -969,6 +994,9 @@ struct SyncvTable
     void free_barriers(size_t N, barrier_id* barriers)
     {
         for (size_t i = 0; i < N; ++i) {
+            if (!barriers[i]) {
+                continue;
+            }
             const auto barrier_id = get_barrier_id(&barriers[i]);
             const BarrierState& state = barrier_states[barrier_id];
             assert(state.arrive_count == state.await_count);  // TODO should not be assert
@@ -1670,7 +1698,7 @@ struct SyncvTable
 
 
 
-    template <bool IsMutate>
+    template <bool IsMutate, bool UpdateRecords>
     void checked_on_access_impl(size_t N,
                                 assignment_record_id* p_assignment_record_ids,
                                 SigthreadInterval accessor_set)
@@ -1706,7 +1734,9 @@ struct SyncvTable
             }
 
             // Add new visibility record (either as new mutate visibility record, or appended read visibility record).
+            if constexpr (!UpdateRecords) {
 
+            }
             if constexpr (IsMutate) {
                 // Clear out assignment record on write and add the single mutate visibility record.
                 // TODO this will change for atomic operations.
@@ -1742,7 +1772,7 @@ struct SyncvTable
     void on_r(size_t N, assignment_record_id* p_assignment_record_ids, SigthreadInterval accessor_set)
     {
         if (no_checking_counter == 0) {
-            checked_on_access_impl<false>(N, p_assignment_record_ids, accessor_set);
+            checked_on_access_impl<false, true>(N, p_assignment_record_ids, accessor_set);
         }
     }
 
@@ -1750,10 +1780,17 @@ struct SyncvTable
     {
         assignment_counter++;
         if (no_checking_counter == 0) {
-            checked_on_access_impl<true>(N, p_assignment_record_ids, accessor_set);
+            checked_on_access_impl<true, true>(N, p_assignment_record_ids, accessor_set);
         }
         else {
             clear_visibility(N, p_assignment_record_ids);
+        }
+    }
+
+    void on_check_free(size_t N, assignment_record_id* p_assignment_record_ids, SigthreadInterval accessor_set)
+    {
+        if (no_checking_counter == 0) {
+            checked_on_access_impl<true, false>(N, p_assignment_record_ids, accessor_set);
         }
     }
 
@@ -2165,6 +2202,13 @@ void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadIn
 {
     INTERFACE_PROLOGUE(table)
     table->on_rw(N, array, accessor_set);
+    INTERFACE_EPILOGUE(table)
+}
+
+void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set)
+{
+    INTERFACE_PROLOGUE(table)
+    table->on_check_free(N, array, accessor_set);
     INTERFACE_EPILOGUE(table)
 }
 

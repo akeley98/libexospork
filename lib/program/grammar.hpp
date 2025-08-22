@@ -527,13 +527,13 @@ struct stmt<9>
     CAMSPORK_NODE_VLA_MEMBER(ExprRef)
 };
 
-// SyncEnvFreeShard(Varname name, Varname* distributed_iters)
+// SyncEnvFreeShard(Varname name, expr* offset, expr* extent)
 using SyncEnvFreeShard = stmt<10>;
 template<>
 struct stmt<10>
 {
     Varname name;
-    CAMSPORK_NODE_VLA_MEMBER(Varname)
+    CAMSPORK_NODE_VLA_MEMBER(OffsetExtentExpr)
 };
 
 // BarrierEnvAlloc(Varname name, expr* extent)

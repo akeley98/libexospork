@@ -66,7 +66,7 @@ static void cuboid_util_test_case(
 {
     TestCuboidCallback callback(line, std::move(expected));
     cuboid_to_intervals<uint32_t>(
-        callback, outer.begin(), outer.end(), offset.begin(), offset.end(), inner.begin(), inner.end());
+        outer.begin(), outer.end(), offset.begin(), offset.end(), inner.begin(), inner.end(), callback);
     callback.check();
 }
 

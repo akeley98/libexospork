@@ -58,6 +58,7 @@ SyncvTable* copy_syncv_table(const SyncvTable* table);
 void delete_syncv_table(SyncvTable* table);
 void on_r(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set);
 void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set);
+void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set);
 void clear_visibility(SyncvTable* table, size_t N, assignment_record_id* array);
 void alloc_barriers(SyncvTable* table, size_t N, barrier_id* barriers);
 void free_barriers(SyncvTable* table, size_t N, barrier_id* barriers);
