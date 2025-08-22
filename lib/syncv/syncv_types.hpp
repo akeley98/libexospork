@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <stdexcept>
 #include <stdint.h>
 
 #include "../util/require.hpp"
@@ -37,6 +38,13 @@ struct syncv_init_t
     uint64_t memory_budget;
     uint64_t debug_assignment_id;
     uint64_t debug_operation_id;
+};
+
+struct SyncvCheckFail : std::runtime_error
+{
+    SyncvCheckFail(const std::string& msg) : std::runtime_error(msg)
+    {
+    }
 };
 
 struct SyncvTable;

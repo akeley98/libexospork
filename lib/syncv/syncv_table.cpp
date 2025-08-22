@@ -999,7 +999,12 @@ struct SyncvTable
             }
             const auto barrier_id = get_barrier_id(&barriers[i]);
             const BarrierState& state = barrier_states[barrier_id];
-            assert(state.arrive_count == state.await_count);  // TODO should not be assert
+            if (state.arrive_count != state.await_count) {
+                SyncvCheckFail(
+                    "Arrive count (" + std::to_string(state.arrive_count) + ") != Await count ("
+                    + std::to_string(state.await_count) + ")"
+                );
+            }
 
             uint64_t& word = live_barrier_bits[barrier_id / 64u];
             const uint64_t bit = uint64_t(1) << (barrier_id & 63u);
@@ -1718,7 +1723,9 @@ struct SyncvTable
             while (mutate_id) {
                 AssignmentRecordMutateNode& node = get(mutate_id);
                 const VisRecord& mutate_record = remove_forwarding(&node.vis_record_id);
-                assert(visible_to(mutate_record, accessor_set));  // TODO shouldn't be assert: RAW or WAW
+                if (!visible_to(mutate_record, accessor_set)) {
+                    throw SyncvCheckFail(IsMutate ? "WAW Hazard" : "RAW Hazard");
+                }
                 mutate_id = node.camspork_next_id;
             }
 
@@ -1728,14 +1735,16 @@ struct SyncvTable
                 while (read_id) {
                     AssignmentRecordReadNode& node = get(read_id);
                     const VisRecord& read_record = remove_forwarding(&node.vis_record_id);
-                    assert(visible_to(read_record, accessor_set));  // TODO shouldn't be assert: WAR hazard
+                    if (!visible_to(read_record, accessor_set)) {
+                        throw SyncvCheckFail("RAW Hazard");
+                    }
                     read_id = node.camspork_next_id;
                 }
             }
 
             // Add new visibility record (either as new mutate visibility record, or appended read visibility record).
             if constexpr (!UpdateRecords) {
-
+                // Disabled
             }
             if constexpr (IsMutate) {
                 // Clear out assignment record on write and add the single mutate visibility record.

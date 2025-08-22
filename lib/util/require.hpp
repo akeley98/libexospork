@@ -50,3 +50,5 @@ template <typename LHS, typename RHS>
 
 #define CAMSPORK_C_BOUNDSCHECK(i, bounds) \
     CAMSPORK_REQUIRE_CMP(size_t(i), <, size_t(bounds), "this may be a bug in the C library, or a corrupt input file")
+
+

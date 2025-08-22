@@ -137,7 +137,7 @@ void threads_program_test()
     env.exec();
 }
 
-void simple_fence_test()
+void simple_fence_test(uint32_t n_tasks, bool have_fence)
 {
     ProgramBuilder builder;
     const ExprRef _0 = builder.add_Const(0);
@@ -149,7 +149,6 @@ void simple_fence_test()
     builder.add_SyncEnvAlloc(gmem_v, 1, &_256);
 
     const uint32_t initial_domain[1] = {256};
-    const uint32_t n_tasks = 1;
     builder.push_ParallelBlock(1, initial_domain);
     {
         const Varname task_v = builder.add_variable("task");
@@ -165,7 +164,9 @@ void simple_fence_test()
                 builder.add_SyncEnvAccess(smem_v, 1, &idx, true, false, 1, 1);
             }
             builder.pop_body();
-            builder.add_Fence(true, 1, 1, 1);
+            if (have_fence) {
+                builder.add_Fence(true, 1, 1, 1);
+            }
             builder.push_ThreadsFor(thread_v, _0, _256, 0, 0, 1);
             {
                 const Varname i_v = builder.add_variable("i");
@@ -183,24 +184,36 @@ void simple_fence_test()
                 builder.add_SyncEnvAccess(gmem_v, 1, &idx, true, false, 1, 1);
             }
             builder.pop_body();
-            builder.add_Fence(true, 1, 1, 1);
+            if (have_fence) {
+                builder.add_Fence(true, 1, 1, 1);
+            }
         }
         builder.pop_body();
     }
     // End ParallelBlock
     builder.pop_body();
 
-    printf("Hello\n");
     builder.finish();
+
+    const bool expected_error = n_tasks > 1 || (n_tasks >= 1 && !have_fence);
+    bool had_error = false;
     ProgramEnv env(builder.size(), builder.data());
-    env.exec();
+    try {
+        env.exec();
+    }
+    catch (SyncvCheckFail& fail) {
+        had_error = true;
+    }
+    CAMSPORK_REQUIRE_CMP(had_error, ==, expected_error, "test failed");
 }
 
 }
 
 int main()
 {
-    camspork::simple_fence_test();
+    camspork::simple_fence_test(1, true);
+    camspork::simple_fence_test(2, true);
+    camspork::simple_fence_test(1, false);
     camspork::threads_program_test();
     camspork::test_cuboid_util();
     test_sync_env();
