@@ -137,10 +137,70 @@ void threads_program_test()
     env.exec();
 }
 
+void simple_fence_test()
+{
+    ProgramBuilder builder;
+    const ExprRef _0 = builder.add_Const(0);
+    const ExprRef _1 = builder.add_Const(1);
+    const ExprRef _256 = builder.add_Const(256);
+
+    const Varname thread_v = builder.add_variable("thread");
+    const Varname gmem_v = builder.add_variable("gmem");
+    builder.add_SyncEnvAlloc(gmem_v, 1, &_256);
+
+    const uint32_t initial_domain[1] = {256};
+    const uint32_t n_tasks = 1;
+    builder.push_ParallelBlock(1, initial_domain);
+    {
+        const Varname task_v = builder.add_variable("task");
+        builder.push_TasksFor(task_v, _0, builder.add_Const(n_tasks));
+        {
+            const Varname smem_v = builder.add_variable("smem");
+            builder.add_SyncEnvAlloc(smem_v, 1, &_256);
+            builder.push_ThreadsFor(thread_v, _0, _256, 0, 0, 1);
+            {
+                OffsetExtentExpr idx;
+                idx.offset_e = builder.add_ReadValue(thread_v, 0, nullptr);
+                idx.extent_e = _1;
+                builder.add_SyncEnvAccess(smem_v, 1, &idx, true, false, 1, 1);
+            }
+            builder.pop_body();
+            builder.add_Fence(true, 1, 1, 1);
+            builder.push_ThreadsFor(thread_v, _0, _256, 0, 0, 1);
+            {
+                const Varname i_v = builder.add_variable("i");
+                builder.push_SeqFor(i_v, _0, _256);
+                {
+                    OffsetExtentExpr idx;
+                    idx.offset_e = builder.add_ReadValue(i_v, 0, nullptr);
+                    idx.extent_e = _1;
+                    builder.add_SyncEnvAccess(smem_v, 1, &idx, false, false, 1, 1);
+                }
+                builder.pop_body();
+                OffsetExtentExpr idx;
+                idx.offset_e = builder.add_ReadValue(thread_v, 0, nullptr);
+                idx.extent_e = _1;
+                builder.add_SyncEnvAccess(gmem_v, 1, &idx, true, false, 1, 1);
+            }
+            builder.pop_body();
+            builder.add_Fence(true, 1, 1, 1);
+        }
+        builder.pop_body();
+    }
+    // End ParallelBlock
+    builder.pop_body();
+
+    printf("Hello\n");
+    builder.finish();
+    ProgramEnv env(builder.size(), builder.data());
+    env.exec();
+}
+
 }
 
 int main()
 {
+    camspork::simple_fence_test();
     camspork::threads_program_test();
     camspork::test_cuboid_util();
     test_sync_env();

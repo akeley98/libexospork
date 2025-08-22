@@ -148,8 +148,8 @@ class ProgramExec
         }
     }
 
-    template <bool IsOOO, bool IsMutate>
-    void operator() (const SyncEnvAccessNode<IsOOO, IsMutate>* node)
+    template <bool IsMutate, bool IsOOO>
+    void operator() (const SyncEnvAccessNode<IsMutate, IsOOO>* node)
     {
         VarSlotEntry<assignment_record_id>& slot = env.sync_slot(node->name);
         eval_tmp_extent(node);
@@ -164,11 +164,11 @@ class ProgramExec
             {
                 CAMSPORK_REQUIRE_CMP(node->initial_qual_bit, ==, node->extended_qual_bits, "TODO");
                 uint32_t bitfield = node->initial_qual_bit;
-                if (!IsOOO) {
+                if (!node->is_ooo) {
                     bitfield |= sync_bit;
                 }
                 const auto& tl_input = env.thread_cuboid.with_timeline(bitfield);
-                if constexpr (IsMutate) {
+                if (node->is_mutate) {
                     on_rw(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
                 }
                 else {
@@ -341,7 +341,7 @@ class ProgramExec
         env.thread_cuboid.box()[dim_idx] = box_c;
 
         for (value_t i = lo; i < hi; ++i) {
-            if (true) {
+            if (false) {
                 const char* var_c_name = env.var_slots[node->iter.slot].name.c_str();
                 printf("%s = %i, %s\n", var_c_name, i, (std::stringstream() << env.thread_cuboid).str().c_str());
             }
