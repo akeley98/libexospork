@@ -1000,10 +1000,11 @@ struct SyncvTable
             const auto barrier_id = get_barrier_id(&barriers[i]);
             const BarrierState& state = barrier_states[barrier_id];
             if (state.arrive_count != state.await_count) {
-                SyncvCheckFail(
+                thread_local_message_ref() = (
                     "Arrive count (" + std::to_string(state.arrive_count) + ") != Await count ("
                     + std::to_string(state.await_count) + ")"
                 );
+                throw SyncvCheckFail{};
             }
 
             uint64_t& word = live_barrier_bits[barrier_id / 64u];
@@ -1724,7 +1725,8 @@ struct SyncvTable
                 AssignmentRecordMutateNode& node = get(mutate_id);
                 const VisRecord& mutate_record = remove_forwarding(&node.vis_record_id);
                 if (!visible_to(mutate_record, accessor_set)) {
-                    throw SyncvCheckFail(IsMutate ? "WAW Hazard" : "RAW Hazard");
+                    thread_local_message_ref() = IsMutate ? "WAW Hazard" : "RAW Hazard";
+                    throw SyncvCheckFail{};
                 }
                 mutate_id = node.camspork_next_id;
             }
@@ -1736,7 +1738,8 @@ struct SyncvTable
                     AssignmentRecordReadNode& node = get(read_id);
                     const VisRecord& read_record = remove_forwarding(&node.vis_record_id);
                     if (!visible_to(read_record, accessor_set)) {
-                        throw SyncvCheckFail("RAW Hazard");
+                        thread_local_message_ref() = "WAR Hazard";
+                        throw SyncvCheckFail{};
                     }
                     read_id = node.camspork_next_id;
                 }

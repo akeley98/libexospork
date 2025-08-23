@@ -32,7 +32,8 @@ using value_t = int32_t;
 
 enum class binop : uint32_t
 {
-    Assign,
+    // 0 reserved as error code
+    Assign = 1,
     Add,
     Sub,
     Mul,
@@ -306,7 +307,17 @@ class NodeNursery
 
 struct Varname
 {
-    uint32_t slot;
+    uint32_t slot_1_index = 0;  // slot index + 1
+
+    operator bool() const
+    {
+        return slot_1_index != 0;
+    }
+
+    uint32_t slot() const
+    {
+        return slot_1_index - 1;
+    }
 };
 
 template <uint32_t IgnoredTypeID>

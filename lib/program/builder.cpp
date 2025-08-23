@@ -85,8 +85,10 @@ ExprRef ProgramBuilder::add_BinOp(binop op, ExprRef lhs, ExprRef rhs)
 
 StmtRef ProgramBuilder::add_SyncEnvAccess(
     Varname name, size_t num_idx, const OffsetExtentExpr* idx,
-    bool is_mutate, bool is_ooo, qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits)
+    uint32_t is_mutate, uint32_t is_ooo, qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits)
 {
+    CAMSPORK_REQUIRE_CMP(is_mutate, <=, 1, "must be bool");
+    CAMSPORK_REQUIRE_CMP(is_ooo, <=, 1, "must be bool");
     auto impl = [&] (auto node)
     {
         node.name = name;
@@ -138,6 +140,11 @@ StmtRef ProgramBuilder::add_ValueEnvAlloc(Varname name, size_t num_dims, const E
 StmtRef ProgramBuilder::add_SyncEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent)
 {
     return append_impl(SyncEnvAlloc{name}, num_dims, extent);
+}
+
+StmtRef ProgramBuilder::add_BarrierEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent)
+{
+    return append_impl(BarrierEnvAlloc{name}, num_dims, extent);
 }
 
 StmtRef ProgramBuilder::push_If(ExprRef cond)
@@ -245,4 +252,217 @@ StmtRef ProgramBuilder::body_to_nursery(const std::vector<StmtRef>& stmts)
     }
 }
 
+BinOpTable::BinOpTable()
+{
+    entries_by_char['='][0] = BinOpTableEntry{'\0', binop::Assign};
+    entries_by_char['+'][0] = BinOpTableEntry{'\0', binop::Add};
+    entries_by_char['-'][0] = BinOpTableEntry{'\0', binop::Sub};
+    entries_by_char['*'][0] = BinOpTableEntry{'\0', binop::Mul};
+    entries_by_char['/'][0] = BinOpTableEntry{'\0', binop::Div};
+    entries_by_char['%'][0] = BinOpTableEntry{'\0', binop::Mod};
+    entries_by_char['<'][0] = BinOpTableEntry{'\0', binop::Less};
+    entries_by_char['<'][1] = BinOpTableEntry{'=', binop::Leq};
+    entries_by_char['>'][0] = BinOpTableEntry{'\0', binop::Greater};
+    entries_by_char['>'][1] = BinOpTableEntry{'=', binop::Geq};
+    entries_by_char['='][1] = BinOpTableEntry{'=', binop::Eq};
+    entries_by_char['!'][1] = BinOpTableEntry{'=', binop::Neq};
+}
+
+binop BinOpTable::get(const char* p_str) const
+{
+    uint8_t first_char = uint8_t(p_str[0]);
+    // String length must be 1 or 2 to match anything.
+    if (first_char != 0 && (p_str[1] == 0 || p_str[2] == 0)) {
+        int second_char = int(uint8_t(p_str[1]));
+        for (BinOpTableEntry entry : entries_by_char[first_char]) {
+            if (second_char == entry.second_char) {
+                return entry.op;
+            }
+        }
+    }
+    throw std::runtime_error(std::string("BinOpTable::get, unknown: \"") + p_str + "\"");
+}
+
+const BinOpTable binop_table;
+
+}  // end namespace
+
+camspork::ProgramBuilder* camspork_new_ProgramBuilder()
+{
+    CAMSPORK_API_PROLOGUE
+    return new camspork::ProgramBuilder();
+    CAMSPORK_API_EPILOGUE(nullptr)
+}
+
+void camspork_delete_ProgramBuilder(camspork::ProgramBuilder* p_builder)
+{
+    delete p_builder;
+}
+
+int camspork_finish_ProgramBuilder(camspork::ProgramBuilder* p_builder)
+{
+    CAMSPORK_API_PROLOGUE
+    p_builder->finish();
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+camspork::Varname camspork_add_variable(camspork::ProgramBuilder* p_builder, const char* p_name)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_variable(p_name);
+    CAMSPORK_API_EPILOGUE(camspork::Varname())
+}
+
+camspork::ExprRef camspork_add_ReadValue(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_idx, const camspork::ExprRef* idx)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_ReadValue(name, num_idx, idx);
+    CAMSPORK_API_EPILOGUE(camspork::ExprRef())
+}
+
+camspork::ExprRef camspork_add_Const(camspork::ProgramBuilder* p_builder,
+    camspork::value_t value)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_Const(value);
+    CAMSPORK_API_EPILOGUE(camspork::ExprRef())
+}
+
+camspork::ExprRef camspork_add_USub(camspork::ProgramBuilder* p_builder,
+    camspork::ExprRef arg)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_USub(arg);
+    CAMSPORK_API_EPILOGUE(camspork::ExprRef())
+}
+
+camspork::ExprRef camspork_add_BinOp(camspork::ProgramBuilder* p_builder,
+    camspork::binop op, camspork::ExprRef lhs, camspork::ExprRef rhs)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_BinOp(op, lhs, rhs);
+    CAMSPORK_API_EPILOGUE(camspork::ExprRef())
+}
+
+camspork::StmtRef camspork_add_SyncEnvAccess(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_idx, const camspork::OffsetExtentExpr* idx, uint32_t is_mutate, uint32_t is_ooo,
+    camspork::qual_bits_t initial_qual_bit, camspork::qual_bits_t extended_qual_bits)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_SyncEnvAccess(name, num_idx, idx, is_mutate, is_ooo, initial_qual_bit, extended_qual_bits);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_add_MutateValue(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_idx, const camspork::ExprRef* idx, camspork::binop op, camspork::ExprRef rhs)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_MutateValue(name, num_idx, idx, op, rhs);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_add_Fence(camspork::ProgramBuilder* p_builder,
+    uint32_t V1_transitive, camspork::qual_bits_t L1_qual_bits,
+    camspork::qual_bits_t L2_full_qual_bits, camspork::qual_bits_t L2_temporal_qual_bits)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_Fence(V1_transitive, L1_qual_bits, L2_full_qual_bits, L2_temporal_qual_bits);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_add_ValueEnvAlloc(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_dims, const camspork::ExprRef* extent)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_ValueEnvAlloc(name, num_dims, extent);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_add_SyncEnvAlloc(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_dims, const camspork::ExprRef* extent)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_SyncEnvAlloc(name, num_dims, extent);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_add_BarrierEnvAlloc(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_dims, const camspork::ExprRef* extent)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_BarrierEnvAlloc(name, num_dims, extent);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_push_If(camspork::ProgramBuilder* p_builder,
+    camspork::ExprRef cond)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->push_If(cond);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+int camspork_begin_orelse(camspork::ProgramBuilder* p_builder)
+{
+    CAMSPORK_API_PROLOGUE
+    p_builder->begin_orelse();
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+camspork::StmtRef camspork_push_SeqFor(camspork::ProgramBuilder* p_builder,
+    camspork::Varname iter, camspork::ExprRef lo, camspork::ExprRef hi)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->push_SeqFor(iter, lo, hi);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_push_TasksFor(camspork::ProgramBuilder* p_builder,
+    camspork::Varname iter, camspork::ExprRef lo, camspork::ExprRef hi)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->push_TasksFor(iter, lo, hi);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_push_ThreadsFor(camspork::ProgramBuilder* p_builder,
+    camspork::Varname iter, camspork::ExprRef lo, camspork::ExprRef hi, uint32_t dim_idx, uint32_t offset, uint32_t box)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->push_ThreadsFor(iter, lo, hi, dim_idx, offset, box);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_push_ParallelBlock(camspork::ProgramBuilder* p_builder,
+    uint32_t dim, const uint32_t* domain)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->push_ParallelBlock(dim, domain);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_push_DomainSplit(camspork::ProgramBuilder* p_builder,
+    uint32_t dim_idx, uint32_t split_factor)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->push_DomainSplit(dim_idx, split_factor);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+int camspork_pop_body(camspork::ProgramBuilder* p_builder)
+{
+    CAMSPORK_API_PROLOGUE
+    p_builder->pop_body();
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+camspork::binop camspork_binop_from_str(const char* p_str)
+{
+    CAMSPORK_API_PROLOGUE
+    return camspork::binop_table.get(p_str);
+    CAMSPORK_API_EPILOGUE(static_cast<camspork::binop>(0));
 }

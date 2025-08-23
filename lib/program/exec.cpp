@@ -342,7 +342,7 @@ class ProgramExec
 
         for (value_t i = lo; i < hi; ++i) {
             if (false) {
-                const char* var_c_name = env.var_slots[node->iter.slot].name.c_str();
+                const char* var_c_name = env.var_slots[node->iter.slot()].name.c_str();
                 printf("%s = %i, %s\n", var_c_name, i, (std::stringstream() << env.thread_cuboid).str().c_str());
             }
 
@@ -501,7 +501,6 @@ class ProgramExec
         env.var_slots.push_back({std::string(p_str, p_str + num_bytes), {}, {}, {}});
     }
 };
-
 
 static const syncv_init_t default_table_init
 {

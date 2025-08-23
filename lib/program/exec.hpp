@@ -166,12 +166,41 @@ struct VarSlotEnvs
     VarSlotEntry<barrier_id> barrier;
 };
 
+class ProgramEnvSyncvTable
+{
+    SyncvTable* raw_ptr;
+  public:
+    ProgramEnvSyncvTable(SyncvTable* arg = nullptr) : raw_ptr(arg)
+    {
+    }
+    ProgramEnvSyncvTable(const ProgramEnvSyncvTable& other)
+    {
+        raw_ptr = other.raw_ptr ? copy_syncv_table(other.raw_ptr) : nullptr;
+    }
+    ProgramEnvSyncvTable& operator=(ProgramEnvSyncvTable other)
+    {
+        std::swap(raw_ptr, other.raw_ptr);
+        return *this;
+    }
+    ~ProgramEnvSyncvTable()
+    {
+        if (raw_ptr) {
+            delete_syncv_table(raw_ptr);
+        }
+    }
+
+    SyncvTable* get() const
+    {
+        return raw_ptr;
+    }
+};
+
 class ProgramEnv
 {
     size_t program_buffer_size;
     std::shared_ptr<char[]> p_program_buffer;
     const ProgramHeader& header;  // Validated from p_program_buffer
-    SyncvTable_unique_ptr p_syncv_table;
+    ProgramEnvSyncvTable p_syncv_table;
     ThreadCuboid thread_cuboid;
     std::vector<VarSlotEnvs> var_slots;
 
@@ -181,9 +210,8 @@ class ProgramEnv
     ProgramEnv(size_t buffer_size, const char* buffer);
 
     // Currently moves are the same as copies.
-    // TODO enable this, replace SyncvTable_unique_ptr with pImpl copy.
-    // ProgramEnv(const ProgramEnv&) = default;
-    // ProgramEnv& operator=(const ProgramEnv&) = default;
+    ProgramEnv(const ProgramEnv&) = default;
+    ProgramEnv& operator=(const ProgramEnv&) = default;
     ~ProgramEnv() = default;
 
     void exec()
@@ -195,56 +223,62 @@ class ProgramEnv
 
     void alloc_values(Varname name, std::vector<extent_t> extent)
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        var_slots[name.slot].value = VarSlotEntry<value_t>(std::move(extent));
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        var_slots[name.slot()].value = VarSlotEntry<value_t>(std::move(extent));
     }
 
     void alloc_scalar_value(Varname name, value_t value)
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        var_slots[name.slot].value = VarSlotEntry<value_t>(value);
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        var_slots[name.slot()].value = VarSlotEntry<value_t>(value);
+    }
+
+    const std::string& get_varname(Varname name)
+    {
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        return var_slots[name.slot()].name;
     }
 
     VarSlotEntry<value_t>& value_slot(Varname name)
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        return var_slots[name.slot].value;
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        return var_slots[name.slot()].value;
     }
 
     const VarSlotEntry<value_t>& value_slot(Varname name) const
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        return var_slots[name.slot].value;
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        return var_slots[name.slot()].value;
     }
 
     void alloc_sync(Varname name, std::vector<extent_t> extent)
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        var_slots[name.slot].sync = VarSlotEntry<assignment_record_id>(std::move(extent));
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        var_slots[name.slot()].sync = VarSlotEntry<assignment_record_id>(std::move(extent));
     }
 
     VarSlotEntry<assignment_record_id>& sync_slot(Varname name)
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        return var_slots[name.slot].sync;
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        return var_slots[name.slot()].sync;
     }
 
     const VarSlotEntry<assignment_record_id>& sync_slot(Varname name) const
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        return var_slots[name.slot].sync;
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        return var_slots[name.slot()].sync;
     }
 
     VarSlotEntry<barrier_id>& barrier_slot(Varname name)
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        return var_slots[name.slot].barrier;
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        return var_slots[name.slot()].barrier;
     }
 
     const VarSlotEntry<barrier_id>& barrier_slot(Varname name) const
     {
-        CAMSPORK_C_BOUNDSCHECK(name.slot, var_slots.size());
-        return var_slots[name.slot].barrier;
+        CAMSPORK_C_BOUNDSCHECK(name.slot(), var_slots.size());
+        return var_slots[name.slot()].barrier;
     }
 
   private:
@@ -256,4 +290,6 @@ class ProgramEnv
     }
 };
 
-}
+}  // end namespace camspork
+
+// Return 0

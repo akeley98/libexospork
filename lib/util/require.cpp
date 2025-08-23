@@ -3,7 +3,7 @@
 namespace camspork
 {
 
-void camspork_require_fail(
+void require_fail(
     const char* file, int line, const char* expr_str, const char* msg)
 {
     try {
@@ -16,7 +16,7 @@ void camspork_require_fail(
         fprintf(stderr, "Exception while formatting error: %s:%i\n", __FILE__, __LINE__);
     }
     fprintf(stderr, "%s\n", thread_local_message_ref().c_str());
-    throw std::runtime_error("camspork_require_fail");
+    throw RequireFail{};
 }
 
 std::string& thread_local_message_ref()
@@ -25,4 +25,9 @@ std::string& thread_local_message_ref()
     return s;
 }
 
+}
+
+const char* camspork_thread_local_message_c_str()
+{
+    return ::camspork::thread_local_message_ref().c_str();
 }

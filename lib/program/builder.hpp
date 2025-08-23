@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "grammar.hpp"
+#include "../util/api_util.hpp"
 #include "../util/require.hpp"
 
 namespace camspork
@@ -89,7 +90,7 @@ class ProgramBuilder
     Varname add_variable(const char* name)
     {
         variable_slot_names.push_back(name);
-        return Varname{uint32_t(variable_slot_names.size()) - 1};
+        return Varname{uint32_t(variable_slot_names.size())};
     }
 
     // ******************************************************************************************
@@ -105,13 +106,14 @@ class ProgramBuilder
     // ******************************************************************************************
     StmtRef add_SyncEnvAccess(
         Varname name, size_t num_idx, const OffsetExtentExpr* idx,
-        bool is_mutate, bool is_ooo, qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits);
+        uint32_t is_mutate, uint32_t is_ooo, qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits);
     StmtRef add_MutateValue(Varname name, size_t num_idx, const ExprRef* idx, binop op, ExprRef rhs);
     StmtRef add_Fence(
         uint32_t V1_transitive, qual_bits_t L1_qual_bits,
         qual_bits_t L2_full_qual_bits, qual_bits_t L2_temporal_qual_bits);
     StmtRef add_ValueEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent);
     StmtRef add_SyncEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent);
+    StmtRef add_BarrierEnvAlloc(Varname name, size_t num_dims, const ExprRef* extent);
 
     // ******************************************************************************************
     // Add statements with a body to the program.
@@ -143,4 +145,69 @@ class ProgramBuilder
     StmtRef body_to_nursery(const std::vector<StmtRef>& stmts);
 };
 
-}
+struct BinOpTableEntry
+{
+    int second_char = -1;
+    binop op = static_cast<binop>(0);
+};
+
+class BinOpTable
+{
+    BinOpTableEntry entries_by_char[256][2];
+  public:
+    BinOpTable();
+    binop get(const char* p_str) const;
+};
+
+extern const BinOpTable binop_table;
+
+}  // end namespace
+
+// 0 or null returns signal an error.
+
+CAMSPORK_EXPORT camspork::ProgramBuilder* camspork_new_ProgramBuilder();
+CAMSPORK_EXPORT void camspork_delete_ProgramBuilder(camspork::ProgramBuilder* p_builder);
+CAMSPORK_EXPORT int camspork_finish_ProgramBuilder(camspork::ProgramBuilder* p_builder);
+CAMSPORK_EXPORT camspork::Varname camspork_add_variable(camspork::ProgramBuilder* p_builder, const char* p_name);
+
+CAMSPORK_EXPORT camspork::ExprRef camspork_add_ReadValue(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_idx, const camspork::ExprRef* idx);
+CAMSPORK_EXPORT camspork::ExprRef camspork_add_Const(camspork::ProgramBuilder* p_builder,
+    camspork::value_t value);
+CAMSPORK_EXPORT camspork::ExprRef camspork_add_USub(camspork::ProgramBuilder* p_builder,
+    camspork::ExprRef arg);
+CAMSPORK_EXPORT camspork::ExprRef camspork_add_BinOp(camspork::ProgramBuilder* p_builder,
+    camspork::binop op, camspork::ExprRef lhs, camspork::ExprRef rhs);
+
+CAMSPORK_EXPORT camspork::StmtRef camspork_add_SyncEnvAccess(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_idx, const camspork::OffsetExtentExpr* idx, uint32_t is_mutate, uint32_t is_ooo,
+    camspork::qual_bits_t initial_qual_bit, camspork::qual_bits_t extended_qual_bits);
+CAMSPORK_EXPORT camspork::StmtRef camspork_add_MutateValue(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_idx, const camspork::ExprRef* idx, camspork::binop op, camspork::ExprRef rhs);
+CAMSPORK_EXPORT camspork::StmtRef camspork_add_Fence(camspork::ProgramBuilder* p_builder,
+    uint32_t V1_transitive, camspork::qual_bits_t L1_qual_bits,
+    camspork::qual_bits_t L2_full_qual_bits, camspork::qual_bits_t L2_temporal_qual_bits);
+CAMSPORK_EXPORT camspork::StmtRef camspork_add_ValueEnvAlloc(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_dims, const camspork::ExprRef* extent);
+CAMSPORK_EXPORT camspork::StmtRef camspork_add_SyncEnvAlloc(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_dims, const camspork::ExprRef* extent);
+CAMSPORK_EXPORT camspork::StmtRef camspork_add_BarrierEnvAlloc(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_dims, const camspork::ExprRef* extent);
+
+CAMSPORK_EXPORT camspork::StmtRef camspork_push_If(camspork::ProgramBuilder* p_builder,
+    camspork::ExprRef cond);
+CAMSPORK_EXPORT int camspork_begin_orelse(camspork::ProgramBuilder* p_builder);
+CAMSPORK_EXPORT camspork::StmtRef camspork_push_SeqFor(camspork::ProgramBuilder* p_builder,
+    camspork::Varname iter, camspork::ExprRef lo, camspork::ExprRef hi);
+CAMSPORK_EXPORT camspork::StmtRef camspork_push_TasksFor(camspork::ProgramBuilder* p_builder,
+    camspork::Varname iter, camspork::ExprRef lo, camspork::ExprRef hi);
+CAMSPORK_EXPORT camspork::StmtRef camspork_push_ThreadsFor(camspork::ProgramBuilder* p_builder,
+    camspork::Varname iter, camspork::ExprRef lo, camspork::ExprRef hi, uint32_t dim_idx, uint32_t offset, uint32_t box);
+CAMSPORK_EXPORT camspork::StmtRef camspork_push_ParallelBlock(camspork::ProgramBuilder* p_builder,
+    uint32_t dim, const uint32_t* domain);
+CAMSPORK_EXPORT camspork::StmtRef camspork_push_DomainSplit(camspork::ProgramBuilder* p_builder,
+    uint32_t dim_idx, uint32_t split_factor);
+CAMSPORK_EXPORT int camspork_pop_body(camspork::ProgramBuilder* p_builder);
+
+
+CAMSPORK_EXPORT camspork::binop camspork_binop_from_str(const char* p_str);

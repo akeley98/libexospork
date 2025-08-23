@@ -202,6 +202,7 @@ void simple_fence_test(uint32_t n_tasks, bool have_fence)
         env.exec();
     }
     catch (SyncvCheckFail& fail) {
+        printf("%s: %s\n", expected_error ? "expected" : "unexpected", fail.what());
         had_error = true;
     }
     CAMSPORK_REQUIRE_CMP(had_error, ==, expected_error, "test failed");

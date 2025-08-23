@@ -42,7 +42,7 @@ struct syncv_init_t
 
 struct SyncvCheckFail : std::runtime_error
 {
-    SyncvCheckFail(const std::string& msg) : std::runtime_error(msg)
+    SyncvCheckFail() : std::runtime_error("camspork::SyncvCheckFail")
     {
     }
 };
