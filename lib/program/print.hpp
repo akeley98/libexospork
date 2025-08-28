@@ -123,14 +123,20 @@ class ProgramPrinter
         // TODO
     }
 
-    void operator() (const ValueEnvAlloc*)
+    void operator() (const ValueEnvAlloc* node)
     {
-        // TODO
+        print_tabs();
+        *this << "b.ValueEnvAlloc(" << node->name;
+        print_idx(node);
+        *this << ")\n";
     }
 
-    void operator() (const SyncEnvAlloc*)
+    void operator() (const SyncEnvAlloc* node)
     {
-        // TODO
+        print_tabs();
+        *this << "b.SyncEnvAlloc(" << node->name;
+        print_idx(node);
+        *this << ")\n";
     }
 
     void operator() (const SyncEnvFreeShard*)
@@ -138,14 +144,18 @@ class ProgramPrinter
         // TODO
     }
 
-    void operator() (const BarrierEnvAlloc*)
+    void operator() (const BarrierEnvAlloc* node)
     {
-        // TODO
+        print_tabs();
+        *this << "b.BarrierEnvAlloc(" << node->name;
+        print_idx(node);
+        *this << ")\n";
     }
 
-    void operator() (const BarrierEnvFree*)
+    void operator() (const BarrierEnvFree* node)
     {
-        // TODO
+        print_tabs();
+        *this << "b.BarrierEnvAlloc(" << node->name << ")\n";
     }
 
     void operator() (const StmtBody* node)

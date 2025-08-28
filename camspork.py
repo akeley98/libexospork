@@ -96,11 +96,14 @@ class Varname(Structure, BuilderExpr):
     def __bool__(self):
         return self.slot_1_index != 0  # 0 used to signal error (use check_return)
 
+    def as_index_expr(self):
+        return BuilderIndexExpr(self, ())
+
     def build_expr(self, builder):
-        return BuilderReadValue(self, ()).build_expr(builder)
+        return BuilderIndexExpr(self, ()).build_expr(builder)
 
     def __getitem__(self, idxs):
-        return BuilderReadValue(self, ())[idxs]
+        return BuilderIndexExpr(self, ())[idxs]
 
 class OffsetExtentExpr(Structure):
     _fields_ = [("offset", ExprRef), ("extent", ExprRef)]
@@ -275,7 +278,7 @@ class BodyCtx:
 
 
 @dataclass(slots=True)
-class BuilderReadValue(BuilderExpr):
+class BuilderIndexExpr(BuilderExpr):
     _varname: Varname
     _idx: Tuple[BuilderExpr | ExprRef]
 
@@ -290,15 +293,19 @@ class BuilderReadValue(BuilderExpr):
             return dim, e
 
     def build_expr(self, builder) -> ExprRef:
+        # When interpreted as an expression, generate ReadValue"""
         dim, e = self.c_dim_idxs(builder)
         return check_return(_add_ReadValue(builder, self._varname, dim, e))
+
+    def as_index_expr(self):
+        return self
 
     def __getitem__(self, a):
         if isinstance(a, tuple):
             a = tuple(self.typecheck(v) for v in a)
         else:
             a = (self.typecheck(a),)
-        return BuilderReadValue(self._varname, self._idx + a)
+        return BuilderIndexExpr(self._varname, self._idx + a)
 
 @dataclass(slots=True)
 class BuilderConst(BuilderExpr):
@@ -356,37 +363,31 @@ class ProgramBuilder:
             return self._varname_dict[var]
 
     def __getitem__(self, var):
-        """Get BuilderReadValue wrapping a variable"""
-        return BuilderReadValue(self.get_varname(var), ())
+        return self.get_varname(var)
 
     def build_expr(self, e) -> ExprRef:
         return BuilderExpr.typecheck(e).build_expr(self._builder)
 
-    def MutateValue(self, dst: BuilderReadValue, op, rhs) -> StmtRef:
+    def MutateValue(self, dst: BuilderIndexExpr, op, rhs) -> StmtRef:
         dim, idxs = dst.c_dim_idxs(self._builder)
         check_return(_add_MutateValue(self._builder, dst._varname, dim, idxs, to_binop(op), self.build_expr(rhs)))
 
     def Fence(self, V1_transitive: bool, L1_qual_bits: int, L2_full_qual_bits: int, L2_temporal_qual_bits: int):
         check_return(_add_Fence(self._builder, V1_transitive, L1_qual_bits, L2_full_qual_bits, L2_temporal_qual_bits))
 
-    def ValueEnvAlloc(self, name, *extent):
-        self._add_alloc(_add_ValueEnvAlloc, name, extent)
+    def ValueEnvAlloc(self, e: Varname | BuilderIndexExpr):
+        self._add_alloc(_add_ValueEnvAlloc, e)
 
-    def SyncEnvAlloc(self, name, *extent):
-        self._add_alloc(_add_SyncEnvAlloc, name, extent)
+    def SyncEnvAlloc(self, e: Varname | BuilderIndexExpr):
+        self._add_alloc(_add_SyncEnvAlloc, e)
 
-    def BarrierEnvAlloc(self, name, *extent):
-        self._add_alloc(_add_SyncEnvAlloc, name, extent)
+    def BarrierEnvAlloc(self, e: Varname | BuilderIndexExpr):
+        self._add_alloc(_add_SyncEnvAlloc, e)
 
-    def _add_alloc(self, c_adder, name, extent):
-        dim = len(extent)
-        if dim:
-            c_extent = (ExprRef * dim)()
-            for i, tmp in enumerate(extent):
-                c_extent[i] = self.build_expr(tmp)
-        else:
-            c_extent = ptr_ExprRef()
-        c_adder(self._builder, self.get_varname(name), dim, c_extent)
+    def _add_alloc(self, c_adder, e):
+        e = e.as_index_expr()
+        dim, idxs = e.c_dim_idxs(self._builder)
+        c_adder(self._builder, e._varname, dim, idxs)
 
     def If(self, cond) -> BodyCtx:
         cond = self.build_expr(cond)
@@ -432,11 +433,20 @@ if __name__ == "__main__":
     fib_size = 20
     _fib = b.add_variable("fib")
     _iter = b.add_variable("iter")
-    b.ValueEnvAlloc("fib", fib_size)
+    b.ValueEnvAlloc(_fib[fib_size])
     b.MutateValue(_fib[0], "=", 0)
     b.MutateValue(_fib[1], "=", 1)
     with b.SeqFor(_iter, 2, fib_size):
         b.MutateValue(_fib[_iter], "=", _fib[_iter-1] + _fib[_iter-2])
+
+    _dst = b.add_variable("dst")
+    b.ValueEnvAlloc(_dst[fib_size])
+    with b.SeqFor(_iter, 0, fib_size):
+      with b.If(_fib % 5):
+        b.MutateValue(_fib[_iter], "=", -_fib)
+        b.MutateValue(_fib[_iter], "*", 10000)
+        b.begin_orelse()
+        b.MutateValue(_fib[_iter], "/", 5)
 
     b.finish()
     check_return(_thread_local_print_program(_ProgramBuilder_size(b._builder), _ProgramBuilder_data(b._builder)))
