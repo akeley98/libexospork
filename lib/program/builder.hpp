@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -145,22 +146,6 @@ class ProgramBuilder
     StmtRef body_to_nursery(const std::vector<StmtRef>& stmts);
 };
 
-struct BinOpTableEntry
-{
-    int second_char = -1;
-    binop op = static_cast<binop>(0);
-};
-
-class BinOpTable
-{
-    BinOpTableEntry entries_by_char[256][2];
-  public:
-    BinOpTable();
-    binop get(const char* p_str) const;
-};
-
-extern const BinOpTable binop_table;
-
 }  // end namespace
 
 // 0 or null returns signal an error.
@@ -168,6 +153,8 @@ extern const BinOpTable binop_table;
 CAMSPORK_EXPORT camspork::ProgramBuilder* camspork_new_ProgramBuilder();
 CAMSPORK_EXPORT void camspork_delete_ProgramBuilder(camspork::ProgramBuilder* p_builder);
 CAMSPORK_EXPORT int camspork_finish_ProgramBuilder(camspork::ProgramBuilder* p_builder);
+CAMSPORK_EXPORT size_t camspork_ProgramBuilder_size(camspork::ProgramBuilder* p_builder);
+CAMSPORK_EXPORT const char* camspork_ProgramBuilder_data(camspork::ProgramBuilder* p_builder);
 CAMSPORK_EXPORT camspork::Varname camspork_add_variable(camspork::ProgramBuilder* p_builder, const char* p_name);
 
 CAMSPORK_EXPORT camspork::ExprRef camspork_add_ReadValue(camspork::ProgramBuilder* p_builder,
@@ -194,6 +181,8 @@ CAMSPORK_EXPORT camspork::StmtRef camspork_add_SyncEnvAlloc(camspork::ProgramBui
 CAMSPORK_EXPORT camspork::StmtRef camspork_add_BarrierEnvAlloc(camspork::ProgramBuilder* p_builder,
     camspork::Varname name, uint32_t num_dims, const camspork::ExprRef* extent);
 
+// TODO Arrive, Await, SyncEnvFreeShard, BarrierEnvFree
+
 CAMSPORK_EXPORT camspork::StmtRef camspork_push_If(camspork::ProgramBuilder* p_builder,
     camspork::ExprRef cond);
 CAMSPORK_EXPORT int camspork_begin_orelse(camspork::ProgramBuilder* p_builder);
@@ -209,5 +198,3 @@ CAMSPORK_EXPORT camspork::StmtRef camspork_push_DomainSplit(camspork::ProgramBui
     uint32_t dim_idx, uint32_t split_factor);
 CAMSPORK_EXPORT int camspork_pop_body(camspork::ProgramBuilder* p_builder);
 
-
-CAMSPORK_EXPORT camspork::binop camspork_binop_from_str(const char* p_str);

@@ -3,6 +3,58 @@
 namespace camspork
 {
 
+BinOpNames::BinOpNames()
+{
+    names[0] = "<error>";
+    names[static_cast<uint32_t>(binop::Assign)] = "=";
+    names[static_cast<uint32_t>(binop::Add)] = "+";
+    names[static_cast<uint32_t>(binop::Sub)] = "-";
+    names[static_cast<uint32_t>(binop::Mul)] = "*";
+    names[static_cast<uint32_t>(binop::Div)] = "/";
+    names[static_cast<uint32_t>(binop::Mod)] = "%";
+    names[static_cast<uint32_t>(binop::Less)] = "<";
+    names[static_cast<uint32_t>(binop::Leq)] = "<=";
+    names[static_cast<uint32_t>(binop::Greater)] = ">";
+    names[static_cast<uint32_t>(binop::Geq)] = ">=";
+    names[static_cast<uint32_t>(binop::Eq)] = "==";
+    names[static_cast<uint32_t>(binop::Neq)] = "!=";
+}
+
+const BinOpNames binop_names;
+
+BinOpTable::BinOpTable()
+{
+    entries_by_char['='][0] = BinOpTableEntry{'\0', binop::Assign};
+    entries_by_char['+'][0] = BinOpTableEntry{'\0', binop::Add};
+    entries_by_char['-'][0] = BinOpTableEntry{'\0', binop::Sub};
+    entries_by_char['*'][0] = BinOpTableEntry{'\0', binop::Mul};
+    entries_by_char['/'][0] = BinOpTableEntry{'\0', binop::Div};
+    entries_by_char['%'][0] = BinOpTableEntry{'\0', binop::Mod};
+    entries_by_char['<'][0] = BinOpTableEntry{'\0', binop::Less};
+    entries_by_char['<'][1] = BinOpTableEntry{'=', binop::Leq};
+    entries_by_char['>'][0] = BinOpTableEntry{'\0', binop::Greater};
+    entries_by_char['>'][1] = BinOpTableEntry{'=', binop::Geq};
+    entries_by_char['='][1] = BinOpTableEntry{'=', binop::Eq};
+    entries_by_char['!'][1] = BinOpTableEntry{'=', binop::Neq};
+}
+
+binop BinOpTable::get(const char* p_str) const
+{
+    uint8_t first_char = uint8_t(p_str[0]);
+    // String length must be 1 or 2 to match anything.
+    if (first_char != 0 && (p_str[1] == 0 || p_str[2] == 0)) {
+        int second_char = int(uint8_t(p_str[1]));
+        for (BinOpTableEntry entry : entries_by_char[first_char]) {
+            if (second_char == entry.second_char) {
+                return entry.op;
+            }
+        }
+    }
+    throw std::runtime_error(std::string("BinOpTable::get, unknown: \"") + p_str + "\"");
+}
+
+const BinOpTable binop_table;
+
 const uint32_t ProgramHeader::expected_magic_numbers[] = {
     0x800A0D0A,
     0x736d6163,
@@ -91,4 +143,18 @@ const ProgramHeader& ProgramHeader::validate(size_t buffer_size, const char* buf
     return header;
 }
 
+}
+
+camspork::binop camspork_binop_from_str(const char* p_str)
+{
+    CAMSPORK_API_PROLOGUE
+    return camspork::binop_table.get(p_str);
+    CAMSPORK_API_EPILOGUE(static_cast<camspork::binop>(0));
+}
+
+const char* camspork_binop_to_str(camspork::binop op)
+{
+    CAMSPORK_API_PROLOGUE
+    return camspork::binop_names.get(op);
+    CAMSPORK_API_EPILOGUE(nullptr);
 }

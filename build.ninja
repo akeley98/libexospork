@@ -11,8 +11,9 @@ rule link_test
 build bin/lib/util/require.o: cxx lib/util/require.cpp
 build bin/lib/syncv/syncv_table.o: cxx lib/syncv/syncv_table.cpp
 build bin/lib/program/builder.o: cxx lib/program/builder.cpp
-build bin/lib/program/grammar.o: cxx lib/program/grammar.cpp
 build bin/lib/program/exec.o: cxx lib/program/exec.cpp
+build bin/lib/program/grammar.o: cxx lib/program/grammar.cpp
+build bin/lib/program/print.o: cxx lib/program/print.cpp
 
 build bin/tests/test_exospork.o: cxx tests/test_exospork.cpp
 build bin/tests/test_cuboid_util.o: cxx tests/test_cuboid_util.cpp
@@ -21,9 +22,9 @@ build bin/tests/syncv/test_sync_env.o: cxx tests/syncv/test_sync_env.cpp
 build bin/libexospork.so: link_lib $
     bin/lib/util/require.o $
     bin/lib/syncv/syncv_table.o $
-    bin/lib/program/builder.o bin/lib/program/grammar.o bin/lib/program/exec.o
+    bin/lib/program/builder.o bin/lib/program/exec.o bin/lib/program/grammar.o bin/lib/program/print.o
 
 build bin/test_exospork: link_test bin/tests/syncv/test_sync_env.o bin/tests/test_cuboid_util.o bin/tests/test_exospork.o $
     bin/lib/util/require.o $
     bin/lib/syncv/syncv_table.o $
-    bin/lib/program/builder.o bin/lib/program/grammar.o bin/lib/program/exec.o
+    bin/lib/program/builder.o bin/lib/program/exec.o bin/lib/program/grammar.o bin/lib/program/print.o

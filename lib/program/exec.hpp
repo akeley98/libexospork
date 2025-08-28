@@ -198,7 +198,7 @@ class ProgramEnvSyncvTable
 class ProgramEnv
 {
     size_t program_buffer_size;
-    std::shared_ptr<char[]> p_program_buffer;
+    std::shared_ptr<const char[]> p_program_buffer;
     const ProgramHeader& header;  // Validated from p_program_buffer
     ProgramEnvSyncvTable p_syncv_table;
     ThreadCuboid thread_cuboid;

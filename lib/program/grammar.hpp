@@ -7,6 +7,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "../util/api_util.hpp"
 #include "../util/require.hpp"
 
 #define CAMSPORK_NODE_VLA_MEMBER(T) \
@@ -47,19 +48,53 @@ enum class binop : uint32_t
     Neq,
 };
 
+class BinOpNames
+{
+    static constexpr uint32_t _size = 13;
+    const char* names[_size];
+  public:
+    BinOpNames();
+    const char* get(binop op) const
+    {
+        const uint32_t op_enum = static_cast<uint32_t>(op);
+        CAMSPORK_REQUIRE_CMP(op_enum, >, 0, "binop(0) reserved as error code");
+        CAMSPORK_REQUIRE_CMP(op_enum, <, _size, "invalid binop");
+        return names[op_enum];
+    }
+};
+
+extern const BinOpNames binop_names;
+
+struct BinOpTableEntry
+{
+    int second_char = -1;
+    binop op = static_cast<binop>(0);
+};
+
+class BinOpTable
+{
+    BinOpTableEntry entries_by_char[256][2];
+  public:
+    BinOpTable();
+    binop get(const char* p_str) const;
+};
+
+extern const BinOpTable binop_table;
+
 
 // ******************************************************************************************
 // Polymorphic node reference.
 // The program object will be delivered as a flat buffer of char (must be 32-bit aligned)
-// which is easy to serialize to disk, or move across Python/C ABI boundaries.
+// which is easy to serialize to disk, or move across Python/C ABI boundaries. See ProgramHeader.
 //
 // Each node is a struct immediately followed by an optional variable-length array.
 // (use either the CAMSPORK_NODE_NO_VLA or CAMSPORK_NODE_VLA_MEMBER macros).
-// This VLA is often used for array indices or extents (sizes).
+// This VLA is often used for array indices or extents (sizes), of length camspork_vla_size.
 //
 // The NodeRef identifies both the type of the node, and its position in the buffer/file.
 // Therefore, it is not possible to dereference a NodeRef without a pointer to the buffer.
 // ******************************************************************************************
+// Note: definition duplicated as Python ctypes
 template <template<uint32_t> typename NodeType, uint32_t NumTypes>
 struct NodeRef
 {
@@ -305,6 +340,7 @@ class NodeNursery
 // Currently this information is just a string name for the variable, for debugging.
 // ******************************************************************************************
 
+// Note: definition duplicated as Python ctypes
 struct Varname
 {
     uint32_t slot_1_index = 0;  // slot index + 1
@@ -402,6 +438,7 @@ struct expr<3>
 static_assert(NumExprTypes == 4);
 
 
+// Note: definition duplicated as Python ctypes
 struct OffsetExtentExpr
 {
     ExprRef offset_e;
@@ -566,6 +603,8 @@ struct stmt<12>
 };
 
 // StmtBody(stmt* body)
+// This is statement composition body[0] ; body[1] ; ...
+static constexpr uint32_t StmtBody_ID = 13;
 using StmtBody = stmt<13>;
 template<>
 struct stmt<13>
@@ -659,3 +698,6 @@ struct ProgramHeader
 static_assert(alignof(ProgramHeader) == 4);
 
 }
+
+CAMSPORK_EXPORT camspork::binop camspork_binop_from_str(const char* p_str);
+CAMSPORK_EXPORT const char* camspork_binop_to_str(camspork::binop op);
