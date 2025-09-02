@@ -86,8 +86,8 @@ ExprRef ProgramBuilder::add_BinOp(binop op, ExprRef lhs, ExprRef rhs)
 }
 
 StmtRef ProgramBuilder::add_SyncEnvAccess(
-    Varname name, size_t num_idx, const OffsetExtentExpr* idx,
-    uint32_t is_mutate, uint32_t is_ooo, qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits)
+    Varname name, size_t num_idx, const ExprRef* idx,
+    qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits, uint32_t is_mutate, uint32_t is_ooo)
 {
     CAMSPORK_REQUIRE_CMP(is_mutate, <=, 1, "must be bool");
     CAMSPORK_REQUIRE_CMP(is_ooo, <=, 1, "must be bool");
@@ -96,23 +96,36 @@ StmtRef ProgramBuilder::add_SyncEnvAccess(
         node.name = name;
         node.initial_qual_bit = initial_qual_bit;
         node.extended_qual_bits = extended_qual_bits;
+        node.is_ooo = is_ooo;
         return append_impl(node, num_idx, idx);
     };
     if (is_mutate) {
-        if (is_ooo) {
-            return impl(SyncEnvMutateOOO{});
-        }
-        else {
-            return impl(SyncEnvMutate{});
-        }
+        return impl(SyncEnvMutateSingle{});
     }
     else {
-        if (is_ooo) {
-            return impl(SyncEnvReadOOO{});
-        }
-        else {
-            return impl(SyncEnvRead{});
-        }
+        return impl(SyncEnvReadSingle{});
+    }
+}
+
+StmtRef ProgramBuilder::add_SyncEnvAccess(
+    Varname name, size_t num_idx, const OffsetExtentExpr* idx,
+    qual_bits_t initial_qual_bit, qual_bits_t extended_qual_bits, uint32_t is_mutate, uint32_t is_ooo)
+{
+    CAMSPORK_REQUIRE_CMP(is_mutate, <=, 1, "must be bool");
+    CAMSPORK_REQUIRE_CMP(is_ooo, <=, 1, "must be bool");
+    auto impl = [&] (auto node)
+    {
+        node.name = name;
+        node.initial_qual_bit = initial_qual_bit;
+        node.extended_qual_bits = extended_qual_bits;
+        node.is_ooo = is_ooo;
+        return append_impl(node, num_idx, idx);
+    };
+    if (is_mutate) {
+        return impl(SyncEnvMutateWindow{});
+    }
+    else {
+        return impl(SyncEnvReadWindow{});
     }
 }
 
@@ -334,12 +347,23 @@ camspork::ExprRef camspork_add_BinOp(camspork::ProgramBuilder* p_builder,
     CAMSPORK_API_EPILOGUE(camspork::ExprRef())
 }
 
-camspork::StmtRef camspork_add_SyncEnvAccess(camspork::ProgramBuilder* p_builder,
-    camspork::Varname name, uint32_t num_idx, const camspork::OffsetExtentExpr* idx, uint32_t is_mutate, uint32_t is_ooo,
-    camspork::qual_bits_t initial_qual_bit, camspork::qual_bits_t extended_qual_bits)
+camspork::StmtRef camspork_add_SyncEnvAccessSingle(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_idx, const camspork::ExprRef* idx,
+    camspork::qual_bits_t initial_qual_bit, camspork::qual_bits_t extended_qual_bits,
+    uint32_t is_mutate, uint32_t is_ooo)
 {
     CAMSPORK_API_PROLOGUE
-    return p_builder->add_SyncEnvAccess(name, num_idx, idx, is_mutate, is_ooo, initial_qual_bit, extended_qual_bits);
+    return p_builder->add_SyncEnvAccess(name, num_idx, idx, initial_qual_bit, extended_qual_bits, is_mutate, is_ooo);
+    CAMSPORK_API_EPILOGUE(camspork::StmtRef())
+}
+
+camspork::StmtRef camspork_add_SyncEnvAccessWindow(camspork::ProgramBuilder* p_builder,
+    camspork::Varname name, uint32_t num_idx, const camspork::OffsetExtentExpr* idx,
+    camspork::qual_bits_t initial_qual_bit, camspork::qual_bits_t extended_qual_bits,
+    uint32_t is_mutate, uint32_t is_ooo)
+{
+    CAMSPORK_API_PROLOGUE
+    return p_builder->add_SyncEnvAccess(name, num_idx, idx, initial_qual_bit, extended_qual_bits, is_mutate, is_ooo);
     CAMSPORK_API_EPILOGUE(camspork::StmtRef())
 }
 

@@ -463,44 +463,47 @@ static constexpr uint32_t NumStmtTypes = 20;
 
 using StmtRef = NodeRef<stmt, NumStmtTypes>;
 
+template <bool IsWindow>
 struct SyncEnvAccessNodeData
 {
     Varname name;
     uint32_t initial_qual_bit;
     uint32_t extended_qual_bits;
-    CAMSPORK_NODE_VLA_MEMBER(OffsetExtentExpr)
+    static constexpr bool is_window = IsWindow;
+    using IdxT = std::conditional_t<IsWindow, OffsetExtentExpr, ExprRef>;
+    CAMSPORK_NODE_VLA_MEMBER(IdxT);
 };
 
-template <bool IsMutate, bool IsOOO>
-struct SyncEnvAccessNode : SyncEnvAccessNodeData
+template <bool IsMutate, bool IsWindow>
+struct SyncEnvAccessNode : SyncEnvAccessNodeData<IsWindow>
 {
     static constexpr bool is_mutate = IsMutate;
-    static constexpr bool is_ooo = IsOOO;
+    uint32_t is_ooo;
 };
 
-// SyncEnvRead(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, expr* offset, expr* extent)
-using SyncEnvRead = stmt<0>;
+// SyncEnvReadSingle(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, bool is_ooo, expr* offset)
+using SyncEnvReadSingle = stmt<0>;
 template <>
 struct stmt<0> : SyncEnvAccessNode<false, false>
 {
 };
 
-// SyncEnvReadOOO(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, expr* offset, expr* extent)
-using SyncEnvReadOOO = stmt<1>;
+// SyncEnvReadWindow(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, bool is_ooo, expr* offset, expr* extent)
+using SyncEnvReadWindow = stmt<1>;
 template <>
 struct stmt<1> : SyncEnvAccessNode<false, true>
 {
 };
 
-// SyncEnvMutate(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, expr* offset, expr* extent)
-using SyncEnvMutate = stmt<2>;
+// SyncEnvMutateSingle(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, bool is_ooo, expr* offset)
+using SyncEnvMutateSingle = stmt<2>;
 template <>
 struct stmt<2> : SyncEnvAccessNode<true, false>
 {
 };
 
-// SyncEnvMutateOOO(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, expr* offset, expr* extent)
-using SyncEnvMutateOOO = stmt<3>;
+// SyncEnvMutateWindow(Varname name, qual_tl initial_qual_bit, qual_tl* extended_qual_bits, bool is_ooo, expr* offset, expr* extent)
+using SyncEnvMutateWindow = stmt<3>;
 template <>
 struct stmt<3> : SyncEnvAccessNode<true, true>
 {

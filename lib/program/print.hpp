@@ -30,7 +30,7 @@ class ProgramPrinter
     {
         const ProgramHeader& header = ProgramHeader::validate(buffer_size, program_buffer);
         *this << "@camspork.program\n";
-        *this << "def program(b):\n";
+        *this << "def program(b: camspork.ProgramBuilder):\n";
 
         // Fill var_str_table, and add b.add_variable(...) to output text.
         var_str_set.insert("b");
@@ -94,10 +94,20 @@ class ProgramPrinter
         }
     }
 
-    template <bool IsMutate, bool IsOOO>
-    void operator() (const SyncEnvAccessNode<IsMutate, IsOOO>*)
+    template <bool IsMutate, bool IsWindow>
+    void operator() (const SyncEnvAccessNode<IsMutate, IsWindow>* node)
     {
-        // TODO
+        print_tabs();
+        *this << "b.SyncEnvAccess(" << node->name;
+        print_idx(node, true);  // print offset
+        *this << ", " << node->initial_qual_bit << ", " << node->extended_qual_bits;
+        *this << ", is_mutate=" << (node->is_mutate ? "True" : "False");
+        *this << ", is_ooo=" << (node->is_ooo ? "True" : "False");
+        if constexpr (node->is_window) {
+            *this << ", extent=";
+            print_idx(node, false);  // print extent
+        }
+        *this << ")\n";
     }
 
     void operator() (const MutateValue* node)
@@ -108,9 +118,11 @@ class ProgramPrinter
         *this << ", \"" << node->op << "\", " << node->rhs << ")\n";
     }
 
-    void operator() (const Fence*)
+    void operator() (const Fence* node)
     {
-        // TODO
+        print_tabs();
+        *this << "b.Fence(" << (node->V1_transitive ? "True" : "False") << ", " << node->L1_qual_bits;
+        *this << ", " << node->L2_full_qual_bits << ", " << node->L2_temporal_qual_bits << ")\n";
     }
 
     void operator() (const Arrive*)
@@ -271,13 +283,24 @@ class ProgramPrinter
     }
 
     template <typename Node>
-    void print_idx(const Node* node)
+    void print_idx(const Node* node, bool print_offset=false)
     {
+        auto get_e = [&] (auto i)
+        {
+            auto e = node_vla_get(node, i);
+            if constexpr (std::is_same_v<decltype(e), OffsetExtentExpr>) {
+                return print_offset ? e.offset_e : e.extent_e;
+            }
+            else {
+                return e;
+            }
+        };
+
         const uint32_t dim = node->camspork_vla_size;
         if (dim) {
-            *this << "[" << node_vla_get(node, 0);
+            *this << "[" << get_e(0);
             for (uint32_t i = 1; i < dim; ++i) {
-                *this << ", " << node_vla_get(node, i);
+                *this << ", " << get_e(i);
             }
             *this << "]";
         }

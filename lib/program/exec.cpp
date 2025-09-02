@@ -118,22 +118,27 @@ class ProgramExec
         tmp_extent.resize(dim);
         for (uint32_t i = 0; i < dim; ++i) {
             if constexpr (std::is_same_v<typename Node::camspork_vla_type, OffsetExtentExpr>) {
-                tmp_extent[i] = eval_extent(node_vla_get(node, i).extent_e);
+                tmp_extent[i] = eval_extent_t(node_vla_get(node, i).extent_e);
             }
             else {
-                tmp_extent[i] = eval_extent(node_vla_get(node, i));
+                tmp_extent[i] = eval_extent_t(node_vla_get(node, i));
             }
         }
     }
 
-    // Evaluate ExtentOffsetExpr tuple as tuple of offset values and store into tmp_offset.
+    // Evaluate expressions as tuple of offset values and store into tmp_offset.
     template <typename Node>
     void eval_tmp_offset(const Node* node)
     {
         const uint32_t dim = node->camspork_vla_size;
         tmp_offset.resize(dim);
         for (uint32_t i = 0; i < dim; ++i) {
-            tmp_offset[i] = eval(node_vla_get(node, i).offset_e);
+            if constexpr (std::is_same_v<typename Node::camspork_vla_type, OffsetExtentExpr>) {
+                tmp_offset[i] = eval_extent_t(node_vla_get(node, i).offset_e);
+            }
+            else {
+                tmp_offset[i] = eval_extent_t(node_vla_get(node, i));
+            }
         }
     }
 
@@ -149,34 +154,45 @@ class ProgramExec
         }
     }
 
-    template <bool IsMutate, bool IsOOO>
-    void operator() (const SyncEnvAccessNode<IsMutate, IsOOO>* node)
+    template <bool IsMutate, bool IsWindow>
+    void operator() (const SyncEnvAccessNode<IsMutate, IsWindow>* node)
     {
+        CAMSPORK_REQUIRE_CMP(node->initial_qual_bit, ==, node->extended_qual_bits, "TODO");
+        uint32_t bitfield = node->initial_qual_bit;
+        if (!node->is_ooo) {
+            bitfield |= sync_bit;
+        }
+        const auto& tl_input = env.thread_cuboid.with_timeline(bitfield);
+
         VarSlotEntry<assignment_record_id>& slot = env.sync_slot(node->name);
-        eval_tmp_extent(node);
         eval_tmp_offset(node);
 
-        // TODO cuboid_to_intervals should move into the syncv_table implementation.
-        cuboid_to_intervals<size_t>(
-            slot.extent().begin(), slot.extent().end(),
-            tmp_offset.begin(), tmp_offset.end(),
-            tmp_extent.begin(), tmp_extent.end(),
-            [&] (size_t lo, size_t hi)
-            {
-                CAMSPORK_REQUIRE_CMP(node->initial_qual_bit, ==, node->extended_qual_bits, "TODO");
-                uint32_t bitfield = node->initial_qual_bit;
-                if (!node->is_ooo) {
-                    bitfield |= sync_bit;
+        if constexpr (node->is_window) {
+            eval_tmp_extent(node);
+            // TODO cuboid_to_intervals should move into the syncv_table implementation.
+            cuboid_to_intervals<size_t>(
+                slot.extent().begin(), slot.extent().end(),
+                tmp_offset.begin(), tmp_offset.end(),
+                tmp_extent.begin(), tmp_extent.end(),
+                [&] (size_t lo, size_t hi)
+                {
+                    if (node->is_mutate) {
+                        on_rw(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
+                    }
+                    else {
+                        on_r(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
+                    }
                 }
-                const auto& tl_input = env.thread_cuboid.with_timeline(bitfield);
-                if (node->is_mutate) {
-                    on_rw(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
-                }
-                else {
-                    on_r(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
-                }
+            );
+        }
+        else {
+            if (node->is_mutate) {
+                on_rw(env.p_syncv_table.get(), 1, &slot.idx(tmp_offset.begin(), tmp_offset.end()), tl_input);
             }
-        );
+            else {
+                on_r(env.p_syncv_table.get(), 1, &slot.idx(tmp_offset.begin(), tmp_offset.end()), tl_input);
+            }
+        }
     }
 
     void operator() (const MutateValue* node)
@@ -419,10 +435,10 @@ class ProgramExec
         return e.dispatch(*this, buffer_size, p_buffer);
     }
 
-    extent_t eval_extent(ExprRef e) const
+    extent_t eval_extent_t(ExprRef e) const
     {
         const value_t v = eval(e);
-        CAMSPORK_REQUIRE_CMP(v, >=, 0, "Negative value used as array extent");
+        CAMSPORK_REQUIRE_CMP(v, >=, 0, "Negative value used as array index or extent");
         return extent_t(v);
     }
 

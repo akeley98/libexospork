@@ -108,7 +108,7 @@ class Varname(Structure, BuilderExpr):
         return BuilderIndexExpr(self, ())[idxs]
 
 class OffsetExtentExpr(Structure):
-    _fields_ = [("offset", ExprRef), ("extent", ExprRef)]
+    _fields_ = [("offset_e", ExprRef), ("extent_e", ExprRef)]
 
 # binop enum values are always the same for a given operator (_binop_from_str)
 class binop(Structure):
@@ -173,9 +173,13 @@ _add_BinOp = lib.camspork_add_BinOp
 _add_BinOp.restype = ExprRef
 _add_BinOp.argtypes = (c_void_p, binop, ExprRef, ExprRef)
 
-_add_SyncEnvAccess = lib.camspork_add_SyncEnvAccess
-_add_SyncEnvAccess.restype = StmtRef
-_add_SyncEnvAccess.argtypes = (c_void_p, Varname, c_uint32, ptr_OffsetExtentExpr, c_uint32, c_uint32, c_uint32, c_uint32)
+_add_SyncEnvAccessSingle = lib.camspork_add_SyncEnvAccessSingle
+_add_SyncEnvAccessSingle.restype = StmtRef
+_add_SyncEnvAccessSingle.argtypes = (c_void_p, Varname, c_size_t, ptr_ExprRef, c_uint32, c_uint32, c_uint32, c_uint32)
+
+_add_SyncEnvAccessWindow = lib.camspork_add_SyncEnvAccessWindow
+_add_SyncEnvAccessWindow.restype = StmtRef
+_add_SyncEnvAccessWindow.argtypes = (c_void_p, Varname, c_size_t, ptr_OffsetExtentExpr, c_uint32, c_uint32, c_uint32, c_uint32)
 
 _add_MutateValue = lib.camspork_add_MutateValue
 _add_MutateValue.restype = StmtRef
@@ -425,6 +429,24 @@ class ProgramBuilder:
     def build_expr(self, e) -> ExprRef:
         return BuilderExpr.typecheck(e).build_expr(self._builder)
 
+    def SyncEnvAccess(
+            self, dst: BuilderIndexExpr, initial_qual_bit: int, extended_qual_bits: int, *,
+            is_mutate: bool, is_ooo: bool, extent: Optional[List[BuilderExpr]] = None):
+        dim, offsets = dst.c_dim_idxs(self._builder)
+        if extent:
+            # Window variant -- have to interleave offsets and extents (of window)
+            assert len(extent) == dim
+            c_func = _add_SyncEnvAccessWindow
+            idxs = (OffsetExtentExpr * dim)()
+            for i in range(dim):
+                idxs[i].offset_e = offsets[i]
+                idxs[i].extent_e = self.build_expr(extent[i])
+        else:
+            # Single value variant
+            c_func = _add_SyncEnvAccessSingle
+            idxs = offsets
+        return check_return(c_func(self._builder, dst._varname, dim, idxs, initial_qual_bit, extended_qual_bits, bool(is_mutate), bool(is_ooo)))
+
     def MutateValue(self, dst: BuilderIndexExpr, op, rhs) -> StmtRef:
         dim, idxs = dst.c_dim_idxs(self._builder)
         check_return(_add_MutateValue(self._builder, dst._varname, dim, idxs, to_binop(op), self.build_expr(rhs)))
@@ -476,7 +498,7 @@ class ProgramBuilder:
 
     def ParallelBlock(self, *coords):
         dim = len(coords)
-        array = (c_uint32 * dim)(coords)
+        array = (c_uint32 * dim)(*coords)
         return BodyCtx(self._builder, lambda builder: _push_ParallelBlock(builder, dim, array))
 
     def DomainSplit(self, dim_idx: int, split_factor: int):
@@ -499,6 +521,7 @@ class Camspork:
 # camspork.program will still work even if the user imports *
 camspork = Camspork()
 camspork.program = program
+camspork.ProgramBuilder = ProgramBuilder
 
 
 class ProgramEnv:
@@ -593,3 +616,27 @@ if __name__ == "__main__":
     env.exec()
     for i in range(0, env.read_value("fib_size")):
         print("%2i %i" % (i, env.read_value("fib", i)))
+
+    @camspork.program
+    def fence_test(b: camspork.ProgramBuilder):
+        num_tasks = b.add_variable("num_tasks")
+        fence_enable = b.add_variable("fence_enable")
+        buf = b.add_variable("buf")
+        b.SyncEnvAlloc(buf[256])
+        with b.ParallelBlock(256):
+            task = b.add_variable("task")
+            tid = b.add_variable("tid")
+            with b.TasksFor(task, 0, num_tasks):
+                with b.ThreadsFor(tid, 0, 256, 0, 0, 1):
+                    b.SyncEnvAccess(buf[tid], 1, 1, is_mutate=True, is_ooo=False)
+                with b.If(fence_enable):
+                    b.Fence(True, 1, 1, 1)
+                with b.ThreadsFor(tid, 0, 256, 0, 0, 1):
+                    s = b.add_variable("s")
+                    with b.SeqFor(s, 0, 256):
+                        b.SyncEnvAccess(buf[s], 1, 1, is_mutate=False, is_ooo=False)
+    print(fence_test)
+    env = ProgramEnv(fence_test)
+    env.alloc_scalar_value("num_tasks", 1)
+    env.alloc_scalar_value("fence_enable", 1)
+    env.exec()
