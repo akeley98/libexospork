@@ -474,7 +474,7 @@ class ProgramBuilder:
     def _add_alloc(self, c_adder, e) -> StmtRef:
         e = e.as_index_expr()
         dim, idxs = e.c_dim_idxs(self._builder)
-        return c_adder(self._builder, e._varname, dim, idxs)
+        return check_return(c_adder(self._builder, e._varname, dim, idxs))
 
     def If(self, cond) -> BodyCtx:
         cond = self.build_expr(cond)
