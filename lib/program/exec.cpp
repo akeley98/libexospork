@@ -463,10 +463,16 @@ class ProgramExec
           case binop::Div:
             // Python-style division
             CAMSPORK_REQUIRE_CMP(rhs, >, 0, "Can only divide by positive numbers");
-            return (lhs < 0 ? lhs + rhs - 1 : lhs) / rhs;
+            {
+                const auto q = lhs / rhs;
+                return (q < 0) ? q + rhs : q;
+            }
           case binop::Mod:
             CAMSPORK_REQUIRE_CMP(rhs, >, 0, "Can only modulo by positive numbers");
-            return (lhs < 0 ? lhs + rhs - 1 : lhs) % rhs;
+            {
+                const auto m = lhs % rhs;
+                return (m < 0) ? m + rhs : m;
+            }
           case binop::Less:
             return lhs < rhs;
           case binop::Leq:
