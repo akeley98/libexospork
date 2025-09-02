@@ -439,7 +439,7 @@ class ProgramBuilder:
 
     def SyncEnvAccess(
             self, dst: BuilderIndexExpr, initial_qual_bit: int, extended_qual_bits: int, *,
-            is_mutate: bool, is_ooo: bool, extent: Optional[List[BuilderExpr]] = None):
+            is_mutate: bool, is_ooo: bool, extent: Optional[List[BuilderExpr]] = None) -> StmtRef:
         dim, offsets = dst.c_dim_idxs(self._builder)
         if extent:
             # Window variant -- have to interleave offsets and extents (of window)
@@ -457,24 +457,24 @@ class ProgramBuilder:
 
     def MutateValue(self, dst: BuilderIndexExpr, op, rhs) -> StmtRef:
         dim, idxs = dst.c_dim_idxs(self._builder)
-        check_return(_add_MutateValue(self._builder, dst._varname, dim, idxs, to_binop(op), self.build_expr(rhs)))
+        return check_return(_add_MutateValue(self._builder, dst._varname, dim, idxs, to_binop(op), self.build_expr(rhs)))
 
-    def Fence(self, V1_transitive: bool, L1_qual_bits: int, L2_full_qual_bits: int, L2_temporal_qual_bits: int):
-        check_return(_add_Fence(self._builder, V1_transitive, L1_qual_bits, L2_full_qual_bits, L2_temporal_qual_bits))
+    def Fence(self, V1_transitive: bool, L1_qual_bits: int, L2_full_qual_bits: int, L2_temporal_qual_bits: int) -> StmtRef:
+        return check_return(_add_Fence(self._builder, V1_transitive, L1_qual_bits, L2_full_qual_bits, L2_temporal_qual_bits))
 
-    def ValueEnvAlloc(self, e: Varname | BuilderIndexExpr):
-        self._add_alloc(_add_ValueEnvAlloc, e)
+    def ValueEnvAlloc(self, e: Varname | BuilderIndexExpr) -> StmtRef:
+        return self._add_alloc(_add_ValueEnvAlloc, e)
 
-    def SyncEnvAlloc(self, e: Varname | BuilderIndexExpr):
-        self._add_alloc(_add_SyncEnvAlloc, e)
+    def SyncEnvAlloc(self, e: Varname | BuilderIndexExpr) -> StmtRef:
+        return self._add_alloc(_add_SyncEnvAlloc, e)
 
-    def BarrierEnvAlloc(self, e: Varname | BuilderIndexExpr):
-        self._add_alloc(_add_SyncEnvAlloc, e)
+    def BarrierEnvAlloc(self, e: Varname | BuilderIndexExpr) -> StmtRef:
+        return self._add_alloc(_add_SyncEnvAlloc, e)
 
-    def _add_alloc(self, c_adder, e):
+    def _add_alloc(self, c_adder, e) -> StmtRef:
         e = e.as_index_expr()
         dim, idxs = e.c_dim_idxs(self._builder)
-        c_adder(self._builder, e._varname, dim, idxs)
+        return c_adder(self._builder, e._varname, dim, idxs)
 
     def If(self, cond) -> BodyCtx:
         cond = self.build_expr(cond)
@@ -504,12 +504,12 @@ class ProgramBuilder:
         assert isinstance(box, int)
         return BodyCtx(self._builder, lambda builder: _push_ThreadsFor(builder, var, lo, hi, dim_idx, offset, box))
 
-    def ParallelBlock(self, *coords):
+    def ParallelBlock(self, *coords) -> BodyCtx:
         dim = len(coords)
         array = (c_uint32 * dim)(*coords)
         return BodyCtx(self._builder, lambda builder: _push_ParallelBlock(builder, dim, array))
 
-    def DomainSplit(self, dim_idx: int, split_factor: int):
+    def DomainSplit(self, dim_idx: int, split_factor: int) -> BodyCtx:
         assert isinstance(dim_idx, int)
         assert isinstance(split_factor, int)
         return BodyCtx(self._builder, lambda builder: _push_DomainSplit(builder, dim_idx, split_factor))
