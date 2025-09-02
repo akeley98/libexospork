@@ -92,6 +92,8 @@ class StmtRef(Structure):
     _fields_ = [("raw_data", c_uint32)]
     def __bool__(self):
         return self.raw_data != 0  # 0 used to signal error (use check_return)
+    def __repr__(self):
+        return "camspork.StmtRef(%i)" % self.raw_data
 
 class Varname(Structure, BuilderExpr):
     _fields_ = [("slot_1_index", c_uint32)]
@@ -118,6 +120,7 @@ class binop(Structure):
 
 
 ptr_uint32 = POINTER(c_uint32)
+ptr_StmtRef = POINTER(StmtRef)
 ptr_ExprRef = POINTER(ExprRef)
 ptr_OffsetExtentExpr = POINTER(OffsetExtentExpr)
 
@@ -231,7 +234,7 @@ _push_DomainSplit.argtypes = (c_void_p, c_uint32, c_uint32)
 
 _pop_body = lib.camspork_pop_body
 _pop_body.restype = c_int
-_pop_body.argtypes = (c_void_p,)
+_pop_body.argtypes = (c_void_p, ptr_StmtRef, ptr_StmtRef)
 
 _binop_from_str = lib.camspork_binop_from_str
 _binop_from_str.restype = binop
@@ -308,10 +311,10 @@ def to_binop(op):
 
 
 class BodyCtx:
-    __slots__ = ["_builder", "_on_enter", "stmt", "body", "orelse"]
+    __slots__ = ["_builder", "_on_enter", "node", "body", "orelse"]
     _builder: VoidPtr
     _on_enter: Callable[[VoidPtr], None]
-    stmt: StmtRef
+    node: StmtRef
     body: StmtRef
     orelse: StmtRef
 
@@ -320,12 +323,17 @@ class BodyCtx:
         self._on_enter = on_enter
 
     def __enter__(self, *a):
-        stmt = check_return(self._on_enter(self._builder))
-        assert isinstance(stmt, StmtRef)
-        self.stmt = stmt
+        node = check_return(self._on_enter(self._builder))
+        assert isinstance(node, StmtRef)
+        self.node = node
+        return self
 
     def __exit__(self, *a):
-        _pop_body(self._builder)
+        body = StmtRef()
+        orelse = StmtRef()
+        check_return(_pop_body(self._builder, byref(body), byref(orelse)))
+        self.body = body
+        self.orelse = orelse
 
 
 @dataclass(slots=True)
@@ -626,7 +634,8 @@ if __name__ == "__main__":
         with b.ParallelBlock(256):
             task = b.add_variable("task")
             tid = b.add_variable("tid")
-            with b.TasksFor(task, 0, num_tasks):
+            global tasks_for
+            with b.TasksFor(task, 0, num_tasks) as tasks_for:
                 with b.ThreadsFor(tid, 0, 256, 0, 0, 1):
                     b.SyncEnvAccess(buf[tid], 1, 1, is_mutate=True, is_ooo=False)
                 with b.If(fence_enable):
@@ -636,6 +645,9 @@ if __name__ == "__main__":
                     with b.SeqFor(s, 0, 256):
                         b.SyncEnvAccess(buf[s], 1, 1, is_mutate=False, is_ooo=False)
     print(fence_test)
+    print(tasks_for.node)
+    print(tasks_for.body)
+    print(tasks_for.orelse)
     env = ProgramEnv(fence_test)
     env.alloc_scalar_value("num_tasks", 1)
     env.alloc_scalar_value("fence_enable", 1)

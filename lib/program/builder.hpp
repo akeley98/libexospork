@@ -21,38 +21,43 @@ struct BodyBuilder
     StmtRef body_of;
     std::vector<StmtRef> stmts;
     bool is_orelse = false;
+    StmtRef saved_body={};
+    StmtRef saved_orelse={};
 
     template <uint32_t StmtType>
-    void operator() (stmt<StmtType>*) const
+    void operator() (stmt<StmtType>*)
     {
         // Fallback for node types not specifically targetted below.
         CAMSPORK_REQUIRE_CMP(StmtType, ==, -1, "Internal error: invalid node type for BodyBuilder");
     }
 
-    void operator() (If* node) const
+    void operator() (If* node)
     {
         StmtRef s = body_to_nursery();
         if (is_orelse) {
             node->orelse = s;
+            saved_orelse = s;
         }
         else {
             node->body = s;
+            saved_body = s;
         }
     }
 
     template <typename Node>
-    void set_body_common(Node* node) const
+    void set_body_common(Node* node)
     {
         StmtRef s = body_to_nursery();
         CAMSPORK_REQUIRE(!is_orelse, "Only If statements may have an orelse");
         node->body = s;
+        saved_body = s;
     }
 
-    void operator() (SeqFor* node) const { set_body_common(node); }
-    void operator() (TasksFor* node) const { set_body_common(node); }
-    void operator() (ThreadsFor* node) const { set_body_common(node); }
-    void operator() (ParallelBlock* node) const { set_body_common(node); }
-    void operator() (DomainSplit* node) const { set_body_common(node); }
+    void operator() (SeqFor* node) { set_body_common(node); }
+    void operator() (TasksFor* node) { set_body_common(node); }
+    void operator() (ThreadsFor* node) { set_body_common(node); }
+    void operator() (ParallelBlock* node) { set_body_common(node); }
+    void operator() (DomainSplit* node) { set_body_common(node); }
 
     void begin_orelse();
     StmtRef body_to_nursery() const;
@@ -153,10 +158,10 @@ class ProgramBuilder
     StmtRef push_impl(Args... a);
 
   public:
-    void pop_body();
+    void pop_body(StmtRef* out_body=nullptr, StmtRef* out_orelse=nullptr);
 
     // For use by BodyBuilder.
-    void end_body_builder(const BodyBuilder& body_builder);
+    void end_body_builder(BodyBuilder& body_builder);
     StmtRef body_to_nursery(const std::vector<StmtRef>& stmts);
 };
 
@@ -216,4 +221,5 @@ CAMSPORK_EXPORT camspork::StmtRef camspork_push_ParallelBlock(camspork::ProgramB
     uint32_t dim, const uint32_t* domain);
 CAMSPORK_EXPORT camspork::StmtRef camspork_push_DomainSplit(camspork::ProgramBuilder* p_builder,
     uint32_t dim_idx, uint32_t split_factor);
-CAMSPORK_EXPORT int camspork_pop_body(camspork::ProgramBuilder* p_builder);
+CAMSPORK_EXPORT int camspork_pop_body(camspork::ProgramBuilder* p_builder,
+    camspork::StmtRef* out_body, camspork::StmtRef* out_orelse);

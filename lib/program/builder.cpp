@@ -240,14 +240,21 @@ StmtRef ProgramBuilder::push_impl(Args... a)
     return body_of;
 }
 
-void ProgramBuilder::pop_body()
+void ProgramBuilder::pop_body(StmtRef* out_body, StmtRef* out_orelse)
 {
     CAMSPORK_REQUIRE_CMP(body_stack.size(), >=, 2, "Cannot pop last statement body; use finish()");
-    end_body_builder(body_stack.back());
+    BodyBuilder& body_builder = body_stack.back();
+    end_body_builder(body_builder);
+    if (out_body) {
+        *out_body = body_builder.saved_body;
+    }
+    if (out_orelse) {
+        *out_orelse = body_builder.saved_orelse;
+    }
     body_stack.pop_back();
 }
 
-void ProgramBuilder::end_body_builder(const BodyBuilder& builder)
+void ProgramBuilder::end_body_builder(BodyBuilder& builder)
 {
     CAMSPORK_REQUIRE(builder.body_of, "Internal error, null builder.body_of");
     builder.body_of.dispatch(builder, nursery.size(), nursery.data());
@@ -464,10 +471,10 @@ camspork::StmtRef camspork_push_DomainSplit(camspork::ProgramBuilder* p_builder,
     CAMSPORK_API_EPILOGUE(camspork::StmtRef())
 }
 
-int camspork_pop_body(camspork::ProgramBuilder* p_builder)
+int camspork_pop_body(camspork::ProgramBuilder* p_builder, camspork::StmtRef* out_body, camspork::StmtRef* out_orelse)
 {
     CAMSPORK_API_PROLOGUE
-    p_builder->pop_body();
+    p_builder->pop_body(out_body, out_orelse);
     return 1;
     CAMSPORK_API_EPILOGUE(0)
 }
