@@ -9,6 +9,7 @@
 #include "grammar.hpp"
 #include "../syncv/syncv_table.hpp"
 #include "../syncv/syncv_types.hpp"
+#include "../util/api_util.hpp"
 #include "../util/require.hpp"
 
 namespace camspork
@@ -85,7 +86,9 @@ class VarSlotEntry
     template <typename IdxIterator>
     T& idx(const IdxIterator begin, const IdxIterator end)
     {
-        CAMSPORK_REQUIRE_CMP(_extent.size(), ==, size_t(end - begin), "wrong index count used to read VarSlotEntry");
+        const size_t alloc_dim = _extent.size();
+        const size_t num_idx = size_t(end - begin);
+        CAMSPORK_REQUIRE_CMP(alloc_dim, ==, num_idx, "wrong index count used to read VarSlotEntry");
         size_t linear_idx = 0;
         for (IdxIterator iter = begin ; iter != end; ++iter) {
             const auto dim = iter - begin;
@@ -295,5 +298,28 @@ class ProgramEnv
 };
 
 }  // end namespace camspork
+
+// 0 or null returns signal an error, except for delete.
+
+CAMSPORK_EXPORT camspork::ProgramEnv* camspork_new_ProgramEnv(const camspork::ProgramBuilder* p_builder);
+CAMSPORK_EXPORT camspork::ProgramEnv* camspork_copy_ProgramEnv(const camspork::ProgramEnv* p_original);
+CAMSPORK_EXPORT void camspork_delete_ProgramEnv(camspork::ProgramEnv* p_victim);
+
+CAMSPORK_EXPORT int camspork_exec_top(camspork::ProgramEnv* p_env);
+CAMSPORK_EXPORT int camspork_exec_stmt(camspork::ProgramEnv* p_env, camspork::StmtRef stmt);
+
+CAMSPORK_EXPORT int camspork_alloc_values(
+        camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::extent_t* p_extent);
+CAMSPORK_EXPORT int camspork_alloc_scalar_value(
+        camspork::ProgramEnv* p_env, camspork::Varname name, camspork::value_t value);
+CAMSPORK_EXPORT int camspork_alloc_sync(
+        camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::extent_t* p_extent);
+
+CAMSPORK_EXPORT int camspork_read_value(
+        const camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::value_t* idxs,
+        camspork::value_t* out);
+CAMSPORK_EXPORT int camspork_set_value(
+        camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::value_t* idxs,
+        camspork::value_t arg);
 
 // Return 0

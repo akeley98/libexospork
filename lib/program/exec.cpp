@@ -538,4 +538,86 @@ void ProgramEnv::exec(StmtRef stmt)
     ProgramExec(this).exec(stmt);
 }
 
+}  // end namespace camspork
+
+camspork::ProgramEnv* camspork_new_ProgramEnv(const camspork::ProgramBuilder* p_builder)
+{
+    CAMSPORK_API_PROLOGUE
+    return new camspork::ProgramEnv(*p_builder);
+    CAMSPORK_API_EPILOGUE(nullptr)
+}
+
+camspork::ProgramEnv* camspork_copy_ProgramEnv(const camspork::ProgramEnv* p_original)
+{
+    CAMSPORK_API_PROLOGUE
+    return new camspork::ProgramEnv(*p_original);
+    CAMSPORK_API_EPILOGUE(nullptr)
+}
+
+void camspork_delete_ProgramEnv(camspork::ProgramEnv* p_victim)
+{
+    delete p_victim;
+}
+
+int camspork_exec_top(camspork::ProgramEnv* p_env)
+{
+    CAMSPORK_API_PROLOGUE
+    p_env->exec();
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+int camspork_exec_stmt(camspork::ProgramEnv* p_env, camspork::StmtRef stmt)
+{
+    CAMSPORK_API_PROLOGUE
+    p_env->exec(stmt);
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+int camspork_alloc_values(
+        camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::extent_t* p_extent)
+{
+    CAMSPORK_API_PROLOGUE
+    p_env->alloc_values(name, std::vector<camspork::extent_t>(p_extent, p_extent + dims));
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+int camspork_alloc_scalar_value(
+        camspork::ProgramEnv* p_env, camspork::Varname name, camspork::value_t value)
+{
+    CAMSPORK_API_PROLOGUE
+    p_env->alloc_scalar_value(name, value);
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+int camspork_alloc_sync(
+        camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::extent_t* p_extent)
+{
+    CAMSPORK_API_PROLOGUE
+    p_env->alloc_sync(name, std::vector<camspork::extent_t>(p_extent, p_extent + dims));
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+int camspork_read_value(
+        const camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::value_t* idxs,
+        camspork::value_t* out)
+{
+    CAMSPORK_API_PROLOGUE
+    *out = p_env->value_slot(name).idx(idxs, idxs + dims);
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+int camspork_set_value(
+        camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::value_t* idxs,
+        camspork::value_t arg)
+{
+    CAMSPORK_API_PROLOGUE
+    p_env->value_slot(name).idx(idxs, idxs + dims) = arg;
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
 }

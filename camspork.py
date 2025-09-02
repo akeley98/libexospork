@@ -1,9 +1,11 @@
 import os
 from ctypes import *
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple, Optional
 
 lib = cdll.LoadLibrary(os.path.join(os.path.split(__name__)[0], "bin/libexospork.so"))
+extent_t = c_uint32
+value_t = c_int32
 
 
 class BuilderExpr:
@@ -250,6 +252,47 @@ binop_Eq = check_return(_binop_from_str(b"=="))
 binop_Neq = check_return(_binop_from_str(b"!="))
 
 
+_new_ProgramEnv = lib.camspork_new_ProgramEnv
+_new_ProgramEnv.restype = VoidPtr
+_new_ProgramEnv.argtypes = (c_void_p,)
+
+_copy_ProgramEnv = lib.camspork_copy_ProgramEnv
+_copy_ProgramEnv.restype = VoidPtr
+_copy_ProgramEnv.argtypes = (c_void_p,)
+
+_delete_ProgramEnv = lib.camspork_delete_ProgramEnv
+_delete_ProgramEnv.restype = None
+_delete_ProgramEnv.argtypes = (c_void_p,)
+
+_exec_top = lib.camspork_exec_top
+_exec_top.restype = c_int
+_exec_top.argtypes = (c_void_p,)
+
+_exec_stmt = lib.camspork_exec_stmt
+_exec_stmt.restype = c_int
+_exec_stmt.argtypes = (c_void_p, StmtRef)
+
+_alloc_values = lib.camspork_alloc_values
+_alloc_values.restype = c_int
+_alloc_values.argtypes = (c_void_p, Varname, c_uint32, POINTER(extent_t))
+
+_alloc_scalar_value = lib.camspork_alloc_scalar_value
+_alloc_scalar_value.restype = c_int
+_alloc_scalar_value.argtypes = (c_void_p, Varname, value_t)
+
+_alloc_sync = lib.camspork_alloc_sync
+_alloc_sync.restype = c_int
+_alloc_sync.argtypes = (c_void_p, Varname, c_uint32, POINTER(extent_t))
+
+_read_value = lib.camspork_read_value
+_read_value.restype = c_int
+_read_value.argtypes = (c_void_p, Varname, c_uint32, POINTER(value_t), POINTER(value_t))
+
+_set_value = lib.camspork_set_value
+_set_value.restype = c_int
+_set_value.argtypes = (c_void_p, Varname, c_uint32, POINTER(value_t), value_t)
+
+
 def to_binop(op):
     if isinstance(op, binop):
         return op
@@ -458,10 +501,75 @@ camspork = Camspork()
 camspork.program = program
 
 
+class ProgramEnv:
+    __slots__ = ["_program", "_env", "get_varname"]
+
+    _program: ProgramBuilder
+    _env: VoidPtr
+    get_varname: Callable[[object], Varname]
+
+    def __init__(self, arg):
+        if isinstance(arg, ProgramEnv):
+            self._program = arg._program
+            self._env = check_return(_copy_ProgramEnv(arg._env))
+        else:
+            assert isinstance(arg, ProgramBuilder), "Expect ProgramBuilder or ProgramEnv"
+            self._program = arg
+            self._env = check_return(_new_ProgramEnv(arg._builder))
+        self.get_varname = arg.get_varname
+
+    def __del__(self):
+        _delete_ProgramEnv(self._env)
+        self._env = 0
+
+    def __copy__(self):
+        return ProgramEnv(self)
+
+    def __deepcopy__(self, memo):
+        return ProgramEnv(self)
+
+    def get_program(self) -> ProgramBuilder:
+        return self._program
+
+    def exec(self, stmt: Optional[StmtRef] = None):
+        if stmt is None:
+            check_return(_exec_top(self._env))
+        else:
+            assert isinstance(stmt, StmtRef)
+            check_return(_exec_stmt(self._env, stmt))
+
+    def alloc_scalar_value(self, var, value: int):
+        check_return(_alloc_scalar_value(self._env, self.get_varname(var), value))
+
+    def alloc_values(self, var, *extent):
+        self._alloc_impl(var, extent, _alloc_values)
+
+    def alloc_sync(self, var, *extent):
+        self._alloc_impl(var, extent, _alloc_sync)
+
+    def _alloc_impl(self, var, extent_tuple, c_func):
+        c_var = self.get_varname(var)
+        c_dim = len(extent_tuple)
+        c_extent = (value_t * c_dim)(*extent_tuple)
+        check_return(c_func(self._env, c_var, c_dim, c_extent))
+
+    def read_value(self, var, *idxs):
+        c_dim = len(idxs)
+        c_idxs = (value_t * c_dim)(*idxs)
+        c_out = value_t(0)
+        check_return(_read_value(self._env, self.get_varname(var), c_dim, c_idxs, byref(c_out)))
+        return c_out.value
+
+    def set_value(self, arg, var, *idxs):
+        c_dim = len(idxs)
+        c_idxs = (value_t * c_dim)(*idxs)
+        check_return(_set_value(self._env, self.get_varname(var), c_dim, c_idxs, arg))
+
+
 if __name__ == "__main__":
     @camspork.program
     def fib(b):
-        fib_size = 20
+        fib_size = b.add_variable("fib_size")
         _fib = b.add_variable("fib")
         _iter = b.add_variable("iter")
         b.ValueEnvAlloc(_fib[fib_size])
@@ -473,10 +581,15 @@ if __name__ == "__main__":
         _dst = b.add_variable("dst")
         b.ValueEnvAlloc(_dst[fib_size])
         with b.SeqFor(_iter, 0, fib_size):
-          with b.If(_fib % 5):
-            b.MutateValue(_fib[_iter], "=", -_fib)
+          with b.If(_iter % 5):
+            b.MutateValue(_fib[_iter], "=", -_fib[_iter])
             b.MutateValue(_fib[_iter], "*", 10000)
             b.begin_orelse()
             b.MutateValue(_fib[_iter], "/", 5)
 
+    env = ProgramEnv(fib)
     print(fib)
+    env.alloc_scalar_value("fib_size", 22)
+    env.exec()
+    for i in range(0, env.read_value("fib_size")):
+        print("%2i %i" % (i, env.read_value("fib", i)))
