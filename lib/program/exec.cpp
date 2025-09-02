@@ -118,10 +118,10 @@ class ProgramExec
         tmp_extent.resize(dim);
         for (uint32_t i = 0; i < dim; ++i) {
             if constexpr (std::is_same_v<typename Node::camspork_vla_type, OffsetExtentExpr>) {
-                tmp_extent[i] = eval(node_vla_get(node, i).extent_e);
+                tmp_extent[i] = eval_extent(node_vla_get(node, i).extent_e);
             }
             else {
-                tmp_extent[i] = eval(node_vla_get(node, i));
+                tmp_extent[i] = eval_extent(node_vla_get(node, i));
             }
         }
     }
@@ -417,6 +417,13 @@ class ProgramExec
     value_t eval(ExprRef e) const
     {
         return e.dispatch(*this, buffer_size, p_buffer);
+    }
+
+    extent_t eval_extent(ExprRef e) const
+    {
+        const value_t v = eval(e);
+        CAMSPORK_REQUIRE_CMP(v, >=, 0, "Negative value used as array extent");
+        return extent_t(v);
     }
 
     __attribute__((always_inline))
