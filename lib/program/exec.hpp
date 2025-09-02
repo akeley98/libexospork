@@ -14,6 +14,8 @@
 namespace camspork
 {
 
+class ProgramBuilder;
+
 template <typename T>
 class VarSlotEntry
 {
@@ -208,6 +210,8 @@ class ProgramEnv
     friend class ProgramExec;
 
     ProgramEnv(size_t buffer_size, const char* buffer);
+    ProgramEnv(size_t buffer_size, std::shared_ptr<const char[]> buffer);
+    explicit ProgramEnv(const ProgramBuilder& builder);
 
     // Currently moves are the same as copies.
     ProgramEnv(const ProgramEnv&) = default;

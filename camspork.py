@@ -139,6 +139,10 @@ _finish_ProgramBuilder = lib.camspork_finish_ProgramBuilder
 _finish_ProgramBuilder.restype = c_int
 _finish_ProgramBuilder.argtypes = (c_void_p, )
 
+_ProgramBuilder_is_finished = lib.camspork_ProgramBuilder_is_finished
+_ProgramBuilder_is_finished.restype = c_int
+_ProgramBuilder_is_finished.argtypes = (c_void_p, )
+
 _ProgramBuilder_size = lib.camspork_ProgramBuilder_size
 _ProgramBuilder_size.restype = c_size_t
 _ProgramBuilder_size.argtypes = (c_void_p, )
@@ -347,8 +351,18 @@ class ProgramBuilder:
         _delete_ProgramBuilder(self._builder)
         self._builder = 0
 
+    def __repr__(self):
+        if self.is_finished():
+            check_return(_thread_local_print_program(_ProgramBuilder_size(self._builder), _ProgramBuilder_data(self._builder)))
+            return str(_thread_local_message_c_str(), "utf-8")
+        else:
+            return "ProgramBuilder()"
+
     def finish(self):
         check_return(_finish_ProgramBuilder(self._builder))
+
+    def is_finished(self):
+        return bool(_ProgramBuilder_is_finished(self._builder))
 
     def add_variable(self, name, to_ascii=lambda name: bytes(str(name), "utf8")) -> Varname:
         assert name not in self._varname_dict, f"Duplicate variable name {name!r}"
@@ -428,26 +442,41 @@ class ProgramBuilder:
         return BodyCtx(self._builder, lambda builder: _push_DomainSplit(builder, dim_idx, split_factor))
 
 
-if __name__ == "__main__":
+def program(pyfunc):
     b = ProgramBuilder()
-    fib_size = 20
-    _fib = b.add_variable("fib")
-    _iter = b.add_variable("iter")
-    b.ValueEnvAlloc(_fib[fib_size])
-    b.MutateValue(_fib[0], "=", 0)
-    b.MutateValue(_fib[1], "=", 1)
-    with b.SeqFor(_iter, 2, fib_size):
-        b.MutateValue(_fib[_iter], "=", _fib[_iter-1] + _fib[_iter-2])
-
-    _dst = b.add_variable("dst")
-    b.ValueEnvAlloc(_dst[fib_size])
-    with b.SeqFor(_iter, 0, fib_size):
-      with b.If(_fib % 5):
-        b.MutateValue(_fib[_iter], "=", -_fib)
-        b.MutateValue(_fib[_iter], "*", 10000)
-        b.begin_orelse()
-        b.MutateValue(_fib[_iter], "/", 5)
-
+    pyfunc(b)
     b.finish()
-    check_return(_thread_local_print_program(_ProgramBuilder_size(b._builder), _ProgramBuilder_data(b._builder)))
-    print(str(_thread_local_message_c_str(), "utf8"))
+    return b
+
+
+class Camspork:
+    pass
+
+
+# camspork.program will still work even if the user imports *
+camspork = Camspork()
+camspork.program = program
+
+
+if __name__ == "__main__":
+    @camspork.program
+    def fib(b):
+        fib_size = 20
+        _fib = b.add_variable("fib")
+        _iter = b.add_variable("iter")
+        b.ValueEnvAlloc(_fib[fib_size])
+        b.MutateValue(_fib[0], "=", 0)
+        b.MutateValue(_fib[1], "=", 1)
+        with b.SeqFor(_iter, 2, fib_size):
+            b.MutateValue(_fib[_iter], "=", _fib[_iter-1] + _fib[_iter-2])
+
+        _dst = b.add_variable("dst")
+        b.ValueEnvAlloc(_dst[fib_size])
+        with b.SeqFor(_iter, 0, fib_size):
+          with b.If(_fib % 5):
+            b.MutateValue(_fib[_iter], "=", -_fib)
+            b.MutateValue(_fib[_iter], "*", 10000)
+            b.begin_orelse()
+            b.MutateValue(_fib[_iter], "/", 5)
+
+    print(fib)

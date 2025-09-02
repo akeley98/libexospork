@@ -35,7 +35,7 @@ ProgramBuilder::ProgramBuilder()
 
 void ProgramBuilder::finish()
 {
-    if (is_finished) {
+    if (p_shared_finished_buffer) {
         return;
     }
 
@@ -56,7 +56,9 @@ void ProgramBuilder::finish()
     header.top_level_stmt = top_level_stmt;
     header.var_config_table = var_config_table;
 
-    is_finished = true;
+    char* p_shared_data = new char[nursery.size()];
+    p_shared_finished_buffer.reset(p_shared_data);
+    memcpy(p_shared_data, nursery.data(), size());
 }
 
 ExprRef ProgramBuilder::add_ReadValue(Varname name, size_t num_idx, const ExprRef* idx)
@@ -203,7 +205,7 @@ StmtRef ProgramBuilder::push_DomainSplit(uint32_t dim_idx, uint32_t split_factor
 
 void ProgramBuilder::check_not_finished() const
 {
-    CAMSPORK_REQUIRE(!is_finished, "Cannot modify program after finish()");
+    CAMSPORK_REQUIRE(!p_shared_finished_buffer, "Cannot modify program after finish()");
 }
 
 template <typename...Args>
@@ -272,6 +274,11 @@ int camspork_finish_ProgramBuilder(camspork::ProgramBuilder* p_builder)
     p_builder->finish();
     return 1;
     CAMSPORK_API_EPILOGUE(0)
+}
+
+int camspork_ProgramBuilder_is_finished(const camspork::ProgramBuilder* p_builder)
+{
+    return p_builder->is_finished();
 }
 
 size_t camspork_ProgramBuilder_size(camspork::ProgramBuilder* p_builder)
@@ -440,5 +447,3 @@ int camspork_pop_body(camspork::ProgramBuilder* p_builder)
     return 1;
     CAMSPORK_API_EPILOGUE(0)
 }
-
-

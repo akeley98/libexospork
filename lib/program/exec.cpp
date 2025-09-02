@@ -5,6 +5,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "builder.hpp"
 #include "grammar.hpp"
 #include "../util/cuboid_util.hpp"
 
@@ -513,14 +514,24 @@ static const syncv_init_t default_table_init
 static const uint32_t static_uint32_max = UINT32_MAX;
 
 ProgramEnv::ProgramEnv(size_t buffer_size, const char* buffer)
+  : ProgramEnv(buffer_size, make_shared_program_buffer(buffer_size, buffer))
+{
+}
+
+ProgramEnv::ProgramEnv(size_t buffer_size, std::shared_ptr<const char[]> buffer)
   : program_buffer_size(buffer_size)
-  , p_program_buffer(make_shared_program_buffer(buffer_size, buffer))
-  , header(ProgramHeader::validate(buffer_size, p_program_buffer.get()))
+  , p_program_buffer(buffer)
+  , header(ProgramHeader::validate(buffer_size, buffer.get()))
   , p_syncv_table(new_syncv_table(default_table_init))
   , thread_cuboid(ThreadCuboid::full(&static_uint32_max, 1 + &static_uint32_max))
 {
     ProgramExec(this).init_vars(header.var_config_table);
 };
+
+ProgramEnv::ProgramEnv(const ProgramBuilder& builder)
+  : ProgramEnv(builder.size(), builder.shared_data())
+{
+}
 
 void ProgramEnv::exec(StmtRef stmt)
 {

@@ -65,24 +65,35 @@ class ProgramBuilder
     // 0th entry in body_stack corresponds to the top-level program
     // Further levels are used while building If, For, etc.
     std::vector<BodyBuilder> body_stack;
-    bool is_finished = false;
+    std::shared_ptr<const char[]> p_shared_finished_buffer;
 
   public:
     ProgramBuilder();
 
     // Finalize the program. All push_* must have been paired with pop_body().
+    // This prepares p_shared_finished_buffer.
     void finish();
+
+    bool is_finished() const
+    {
+        return !!p_shared_finished_buffer;
+    }
 
     size_t size() const
     {
-        CAMSPORK_REQUIRE(is_finished, "call ProgramBuilder::finish()");
+        CAMSPORK_REQUIRE(p_shared_finished_buffer, "call ProgramBuilder::finish()");
         return nursery.size();
     }
 
     const char* data() const
     {
-        CAMSPORK_REQUIRE(is_finished, "call ProgramBuilder::finish()");
-        return nursery.data();
+        CAMSPORK_REQUIRE(p_shared_finished_buffer, "call ProgramBuilder::finish()");
+        return p_shared_finished_buffer.get();
+    }
+
+    const std::shared_ptr<const char[]>& shared_data() const
+    {
+        return p_shared_finished_buffer;
     }
 
     // ******************************************************************************************
@@ -148,11 +159,12 @@ class ProgramBuilder
 
 }  // end namespace
 
-// 0 or null returns signal an error.
+// 0 or null returns signal an error, except for delete, is_finished.
 
 CAMSPORK_EXPORT camspork::ProgramBuilder* camspork_new_ProgramBuilder();
 CAMSPORK_EXPORT void camspork_delete_ProgramBuilder(camspork::ProgramBuilder* p_builder);
 CAMSPORK_EXPORT int camspork_finish_ProgramBuilder(camspork::ProgramBuilder* p_builder);
+CAMSPORK_EXPORT int camspork_ProgramBuilder_is_finished(const camspork::ProgramBuilder* p_builder);
 CAMSPORK_EXPORT size_t camspork_ProgramBuilder_size(camspork::ProgramBuilder* p_builder);
 CAMSPORK_EXPORT const char* camspork_ProgramBuilder_data(camspork::ProgramBuilder* p_builder);
 CAMSPORK_EXPORT camspork::Varname camspork_add_variable(camspork::ProgramBuilder* p_builder, const char* p_name);
@@ -197,4 +209,3 @@ CAMSPORK_EXPORT camspork::StmtRef camspork_push_ParallelBlock(camspork::ProgramB
 CAMSPORK_EXPORT camspork::StmtRef camspork_push_DomainSplit(camspork::ProgramBuilder* p_builder,
     uint32_t dim_idx, uint32_t split_factor);
 CAMSPORK_EXPORT int camspork_pop_body(camspork::ProgramBuilder* p_builder);
-
