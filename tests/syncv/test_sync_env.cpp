@@ -33,12 +33,12 @@ void test_sync_env()
 
     for (uint32_t w = 0; w < warp_count; ++w) {
         for (uint32_t tid = w * 32; tid < w * 32 + 32; ++tid) {
-            SigthreadInterval accessor_set{tid, tid+1, sig_generic | SigthreadInterval::sync_bit};
+            TlSigInterval accessor_set{tid, tid+1, sig_generic | TlSigInterval::ordered_bits};
             on_rw(table, 1, &foobar[tid], accessor_set);
         }
 
         for (uint32_t tid = w * 32; tid < w * 32 + 32; ++tid) {
-            SigthreadInterval accessor_set{tid, tid+1, sig_generic | SigthreadInterval::sync_bit};
+            TlSigInterval accessor_set{tid, tid+1, sig_generic | TlSigInterval::ordered_bits};
             on_r(table, 1, &foobar[tid], accessor_set);
         }
     }
@@ -46,15 +46,15 @@ void test_sync_env()
     for (int i = 0; i < 3; ++i) {
         // Simple barrier
         if (true) {
-            SigthreadInterval V1{0, warp_count * 32, sig_generic};
-            SigthreadInterval V2{0, warp_count * 32, sig_generic};
+            TlSigInterval V1{0, warp_count * 32, sig_generic};
+            TlSigInterval V2{0, warp_count * 32, sig_generic};
             on_fence(table, V1, V2, V2, true);
         }
 
         maybe_validate(table);
 
         for (uint32_t tid = 0; tid < 32 * warp_count; ++tid) {
-            SigthreadInterval accessor_set{tid, tid+1, sig_generic | SigthreadInterval::sync_bit};
+            TlSigInterval accessor_set{tid, tid+1, sig_generic | TlSigInterval::ordered_bits};
             for (uint32_t i = 0; i < 32 * warp_count; ++i) {
                 on_r(table, 1, &foobar[i], accessor_set);
             }
@@ -65,7 +65,7 @@ void test_sync_env()
         }
 
         if (true) {
-            SigthreadInterval V{0, warp_count * 32, sig_generic | sig_async};
+            TlSigInterval V{0, warp_count * 32, sig_generic | sig_async};
             on_fence(table, V, V, V, true);
         }
 
@@ -73,7 +73,7 @@ void test_sync_env()
 
         // This should fail if the above barrier is skipped (WAR)
         for (uint32_t tid = 0; tid < 32 * warp_count; ++tid) {
-            SigthreadInterval accessor_set{tid, tid+1, sig_generic | SigthreadInterval::sync_bit};
+            TlSigInterval accessor_set{tid, tid+1, sig_generic | TlSigInterval::ordered_bits};
             on_rw(table, 1, &foobar[tid], accessor_set);
         }
 
@@ -85,8 +85,8 @@ void test_sync_env()
     table = table_unique_ptr.get();
 
     if (true) {
-        SigthreadInterval V1{0, warp_count, sig_generic};
-        SigthreadInterval V2{0, warp_count, sig_async};
+        TlSigInterval V1{0, warp_count, sig_generic};
+        TlSigInterval V2{0, warp_count, sig_async};
         on_fence(table, V1, V2, V2, false);
     }
 
@@ -97,7 +97,7 @@ void test_sync_env()
 
     // Producer
     {
-        SigthreadInterval V1{0, 32, sig_async};
+        TlSigInterval V1{0, 32, sig_async};
         // on_rw(table, 32, &foobar[0], V1);
         on_rw(table, 32, &foobar[0], V1);
         on_arrive(table, &bar, V1, false);
@@ -107,7 +107,7 @@ void test_sync_env()
     // Consumer
     {
         maybe_validate(table);
-        SigthreadInterval V2{32, 64, sig_generic | SigthreadInterval::sync_bit};
+        TlSigInterval V2{32, 64, sig_generic | TlSigInterval::ordered_bits};
         on_await(table, &bar, V2, V2);
         maybe_validate(table);
         on_r(table, 32, &foobar[0], V2);

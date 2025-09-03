@@ -9,8 +9,6 @@
 namespace camspork
 {
 
-constexpr uint32_t sync_bit = 0x8000'0000;
-
 struct assignment_record_id
 {
     uint32_t node_id = 0;
@@ -56,7 +54,7 @@ struct SyncvTableDeleter
 
 using SyncvTable_unique_ptr = std::unique_ptr<SyncvTable, SyncvTableDeleter>;
 
-struct SigthreadInterval;
+struct TlSigInterval;
 
 struct ThreadCuboid
 {
@@ -113,8 +111,8 @@ struct ThreadCuboid
         return prod;
     };
 
-    // TODO add TlSigInput and replace SigthreadInterval.
-    SigthreadInterval with_timeline(uint32_t bitfield) const;
+    // TODO add TlSigInput and replace TlSigInterval.
+    TlSigInterval with_timeline(uint32_t bitfield) const;
 
     // Initialize (end-begin)-dimensional domain with all threads active
     // i.e. offset = 0, box = domain.

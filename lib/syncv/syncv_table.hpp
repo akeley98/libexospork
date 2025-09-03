@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "syncv_types.hpp"
-#include "sigthread.hpp"
+#include "tl_sig.hpp"
 
 namespace camspork
 {
@@ -20,7 +20,7 @@ struct SyncvTable;
 // This limits the number of live barriers and the number of times
 // a barrier can be used. The latter is capped in a real CUDA program
 // by the number of times an mbarrier can be used: pow(2, 20).
-constexpr uint32_t barrier_id_bits = 12;
+constexpr uint32_t barrier_id_bits = 10;
 constexpr uint32_t max_live_barriers = 1u << barrier_id_bits;
 using pending_await_t = uint32_t;
 
@@ -44,8 +44,8 @@ inline pending_await_t pack_pending_await(uint32_t barrier_id, uint32_t counter)
 
 struct VisRecordDebugData
 {
-    uint8_t original_actor_signature;
-    std::vector<SigthreadInterval> visibility_set;
+    uint8_t original_qual_tl;
+    std::vector<TlSigInterval> visibility_set;
     std::vector<pending_await_t> pending_await_list;
 };
 
@@ -55,15 +55,15 @@ struct VisRecordDebugData
 SyncvTable* new_syncv_table(const syncv_init_t& init);
 SyncvTable* copy_syncv_table(const SyncvTable* table);
 void delete_syncv_table(SyncvTable* table);
-void on_r(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set);
-void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set);
-void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, SigthreadInterval accessor_set);
+void on_r(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set);
+void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set);
+void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set);
 void clear_visibility(SyncvTable* table, size_t N, assignment_record_id* array);
 void alloc_barriers(SyncvTable* table, size_t N, barrier_id* barriers);
 void free_barriers(SyncvTable* table, size_t N, barrier_id* barriers);
-void on_fence(SyncvTable* table, SigthreadInterval V1, SigthreadInterval V2_full, SigthreadInterval V2_temporal, bool transitive);
-void on_arrive(SyncvTable* table, barrier_id* bar, SigthreadInterval V1, bool transitive);
-void on_await(SyncvTable* table, barrier_id* bar, SigthreadInterval V2_full, SigthreadInterval V2_temporal);
+void on_fence(SyncvTable* table, TlSigInterval V1, TlSigInterval V2_full, TlSigInterval V2_temporal, bool transitive);
+void on_arrive(SyncvTable* table, barrier_id* bar, TlSigInterval V1, bool transitive);
+void on_await(SyncvTable* table, barrier_id* bar, TlSigInterval V2_full, TlSigInterval V2_temporal);
 void begin_no_checking(SyncvTable* table);
 void end_no_checking(SyncvTable* table);
 

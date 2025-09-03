@@ -161,7 +161,7 @@ void simple_fence_test(uint32_t n_tasks, bool have_fence)
                 OffsetExtentExpr idx;
                 idx.offset_e = builder.add_ReadValue(thread_v, 0, nullptr);
                 idx.extent_e = _1;
-                builder.add_SyncEnvAccess(smem_v, 1, &idx, true, false, 1, 1);
+                builder.add_SyncEnvAccess(smem_v, 1, &idx, 1, 1, true, false);
             }
             builder.pop_body();
             if (have_fence) {
@@ -175,13 +175,13 @@ void simple_fence_test(uint32_t n_tasks, bool have_fence)
                     OffsetExtentExpr idx;
                     idx.offset_e = builder.add_ReadValue(i_v, 0, nullptr);
                     idx.extent_e = _1;
-                    builder.add_SyncEnvAccess(smem_v, 1, &idx, false, false, 1, 1);
+                    builder.add_SyncEnvAccess(smem_v, 1, &idx, 1, 1, false, false);
                 }
                 builder.pop_body();
                 OffsetExtentExpr idx;
                 idx.offset_e = builder.add_ReadValue(thread_v, 0, nullptr);
                 idx.extent_e = _1;
-                builder.add_SyncEnvAccess(gmem_v, 1, &idx, true, false, 1, 1);
+                builder.add_SyncEnvAccess(gmem_v, 1, &idx, 1, 1, true, false);
             }
             builder.pop_body();
             if (have_fence) {

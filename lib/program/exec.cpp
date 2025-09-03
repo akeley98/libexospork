@@ -158,11 +158,9 @@ class ProgramExec
     void operator() (const SyncEnvAccessNode<IsMutate, IsWindow>* node)
     {
         CAMSPORK_REQUIRE_CMP(node->initial_qual_bit, ==, node->extended_qual_bits, "TODO");
-        uint32_t bitfield = node->initial_qual_bit;
-        if (!node->is_ooo) {
-            bitfield |= sync_bit;
-        }
-        const auto& tl_input = env.thread_cuboid.with_timeline(bitfield);
+        uint32_t bitfield = node->initial_qual_bit |
+            (node->is_ooo ? TlSigInterval::unordered_bits : TlSigInterval::ordered_bits);
+        const auto& tl_input = env.prepare_tl_sig_input(bitfield);
 
         VarSlotEntry<assignment_record_id>& slot = env.sync_slot(node->name);
         eval_tmp_offset(node);
@@ -206,9 +204,9 @@ class ProgramExec
     {
         // This whole thing will have to change.
         // It should take qual_tl* L1, L2_full, L2_temporal, and the thread cuboid.
-        const SigthreadInterval V1 = env.thread_cuboid.with_timeline(node->L1_qual_bits);
-        const SigthreadInterval V2_full = env.thread_cuboid.with_timeline(node->L2_full_qual_bits);
-        const SigthreadInterval V2_temporal = env.thread_cuboid.with_timeline(node->L2_temporal_qual_bits);
+        const TlSigInterval V1 = env.prepare_tl_sig_input(node->L1_qual_bits);
+        const TlSigInterval V2_full = env.prepare_tl_sig_input(node->L2_full_qual_bits);
+        const TlSigInterval V2_temporal = env.prepare_tl_sig_input(node->L2_temporal_qual_bits);
         on_fence(env.p_syncv_table.get(), V1, V2_full, V2_temporal, node->V1_transitive);
     }
 
@@ -330,7 +328,9 @@ class ProgramExec
             // Look up Varslot each time in case the loop body did something bad!
             env.value_slot(node->iter).scalar() = i;
             exec(node->body);
-            env.thread_cuboid.task_index++;  // XXX ?
+            // Lazy task index. This prompts task_index to change if actually used.
+            // This avoids wasting task_index values on every level of the TasksFor loop nest.
+            env.dirty_task_index = true;
         }
     }
 
@@ -381,7 +381,9 @@ class ProgramExec
 
         // Execute body with new thread cuboid, and restore before returning (~SwapThreadCuboid).
         SwapThreadCuboid swap(&env.thread_cuboid, new_cuboid);
+        env.dirty_task_index = false;
         exec(node->body);
+        env.dirty_task_index = false;
     }
 
     void operator() (const DomainSplit* node)
