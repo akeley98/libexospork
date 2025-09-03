@@ -160,7 +160,6 @@ class ProgramExec
         CAMSPORK_REQUIRE_CMP(node->initial_qual_bit, ==, node->extended_qual_bits, "TODO");
         uint32_t bitfield = node->initial_qual_bit |
             (node->is_ooo ? TlSigInterval::unordered_bits : TlSigInterval::ordered_bits);
-        const auto& tl_input = env.prepare_tl_sig_input(bitfield);
 
         VarSlotEntry<assignment_record_id>& slot = env.sync_slot(node->name);
         eval_tmp_offset(node);
@@ -175,20 +174,22 @@ class ProgramExec
                 [&] (size_t lo, size_t hi)
                 {
                     if (node->is_mutate) {
-                        on_rw(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
+                        on_rw(env.p_syncv_table.get(), hi - lo, slot.data() + lo, env.prepare_thread_cuboid(), bitfield);
                     }
                     else {
-                        on_r(env.p_syncv_table.get(), hi - lo, slot.data() + lo, tl_input);
+                        on_r(env.p_syncv_table.get(), hi - lo, slot.data() + lo, env.prepare_thread_cuboid(), bitfield);
                     }
                 }
             );
         }
         else {
             if (node->is_mutate) {
-                on_rw(env.p_syncv_table.get(), 1, &slot.idx(tmp_offset.begin(), tmp_offset.end()), tl_input);
+                on_rw(env.p_syncv_table.get(), 1, &slot.idx(tmp_offset.begin(), tmp_offset.end()),
+                    env.prepare_thread_cuboid(), bitfield);
             }
             else {
-                on_r(env.p_syncv_table.get(), 1, &slot.idx(tmp_offset.begin(), tmp_offset.end()), tl_input);
+                on_r(env.p_syncv_table.get(), 1, &slot.idx(tmp_offset.begin(), tmp_offset.end()),
+                    env.prepare_thread_cuboid(), bitfield);
             }
         }
     }
@@ -202,12 +203,8 @@ class ProgramExec
 
     void operator() (const Fence* node)
     {
-        // This whole thing will have to change.
-        // It should take qual_tl* L1, L2_full, L2_temporal, and the thread cuboid.
-        const TlSigInterval V1 = env.prepare_tl_sig_input(node->L1_qual_bits);
-        const TlSigInterval V2_full = env.prepare_tl_sig_input(node->L2_full_qual_bits);
-        const TlSigInterval V2_temporal = env.prepare_tl_sig_input(node->L2_temporal_qual_bits);
-        on_fence(env.p_syncv_table.get(), V1, V2_full, V2_temporal, node->V1_transitive);
+        on_fence(env.p_syncv_table.get(), node->V1_transitive, env.prepare_thread_cuboid(),
+                node->L1_qual_bits, node->L2_full_qual_bits, node->L2_temporal_qual_bits);
     }
 
     void operator() (const Arrive*)
@@ -348,19 +345,19 @@ class ProgramExec
         CAMSPORK_REQUIRE_CMP(lo, ==, 0, "Expected ThreadsFor loop to start from 0 for now");
 
         // Restores thread cuboid before returning.
-        SwapThreadCuboid swap(&env.thread_cuboid);
+        SwapThreadCuboid swap(&env.raw_thread_cuboid);
 
-        CAMSPORK_REQUIRE_CMP(dim_idx, <, env.thread_cuboid.dim(), "ThreadsFor::dim_idx out of range");
-        CAMSPORK_REQUIRE_CMP(offset_c + (hi - lo) * box_c, <=, env.thread_cuboid.box()[dim_idx],
+        CAMSPORK_REQUIRE_CMP(dim_idx, <, env.raw_thread_cuboid.dim(), "ThreadsFor::dim_idx out of range");
+        CAMSPORK_REQUIRE_CMP(offset_c + (hi - lo) * box_c, <=, env.raw_thread_cuboid.box()[dim_idx],
                              "ThreadsFor consumes more threads than exists in the current thread box");
 
-        env.thread_cuboid.offset()[dim_idx] += offset_c;
-        env.thread_cuboid.box()[dim_idx] = box_c;
+        env.raw_thread_cuboid.offset()[dim_idx] += offset_c;
+        env.raw_thread_cuboid.box()[dim_idx] = box_c;
 
         for (value_t i = lo; i < hi; ++i) {
             if (false) {
                 const char* var_c_name = env.var_slots[node->iter.slot()].name.c_str();
-                printf("%s = %i, %s\n", var_c_name, i, (std::stringstream() << env.thread_cuboid).str().c_str());
+                printf("%s = %i, %s\n", var_c_name, i, (std::stringstream() << env.raw_thread_cuboid).str().c_str());
             }
 
             // Look up Varslot each time in case the loop body did something bad!
@@ -368,7 +365,7 @@ class ProgramExec
             exec(node->body);
 
             // Slide thread box over for the next iteration.
-            env.thread_cuboid.offset()[dim_idx] += box_c;
+            env.raw_thread_cuboid.offset()[dim_idx] += box_c;
         }
     }
 
@@ -380,7 +377,7 @@ class ProgramExec
         const ThreadCuboid new_cuboid = ThreadCuboid::full(begin_dims, end_dims);
 
         // Execute body with new thread cuboid, and restore before returning (~SwapThreadCuboid).
-        SwapThreadCuboid swap(&env.thread_cuboid, new_cuboid);
+        SwapThreadCuboid swap(&env.raw_thread_cuboid, new_cuboid);
         env.dirty_task_index = false;
         exec(node->body);
         env.dirty_task_index = false;
@@ -388,7 +385,7 @@ class ProgramExec
 
     void operator() (const DomainSplit* node)
     {
-        ThreadCuboid new_cuboid = env.thread_cuboid;
+        ThreadCuboid new_cuboid = env.raw_thread_cuboid;
         const uint32_t split_idx = node->dim_idx;
         const uint32_t split_factor = node->split_factor;
         CAMSPORK_REQUIRE_CMP(split_idx, <, new_cuboid.dim(), "out-of-range DomainSplit::dim_idx");
@@ -424,7 +421,7 @@ class ProgramExec
         }
 
         // Execute body with new thread cuboid, and restore before returning (~SwapThreadCuboid).
-        SwapThreadCuboid swap(&env.thread_cuboid, new_cuboid);
+        SwapThreadCuboid swap(&env.raw_thread_cuboid, new_cuboid);
         exec(node->body);
     }
 
@@ -554,7 +551,7 @@ ProgramEnv::ProgramEnv(size_t buffer_size, std::shared_ptr<const char[]> buffer)
   , p_program_buffer(buffer)
   , header(ProgramHeader::validate(buffer_size, buffer.get()))
   , p_syncv_table(new_syncv_table(default_table_init))
-  , thread_cuboid(ThreadCuboid::full(&static_uint32_max, 1 + &static_uint32_max))
+  , raw_thread_cuboid(ThreadCuboid::full(&static_uint32_max, 1 + &static_uint32_max))
 {
     ProgramExec(this).init_vars(header.var_config_table);
 };

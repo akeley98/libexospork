@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../util/bit_util.hpp"
+#include "../util/require.hpp"
 #include "syncv_types.hpp"
 
 namespace camspork
@@ -76,10 +77,15 @@ struct TlSigInterval
     // Return the bit index of that qual-tl (e.g. 8 -> 3)
     uint8_t get_unique_qual_tl() const
     {
-        const auto bits = qual_bits();
-        assert(bits != 0);
+        return get_unique_qual_tl(bitfield);
+    }
+
+    static uint8_t get_unique_qual_tl(uint32_t bitfield)
+    {
+        const auto bits = qual_bits(bitfield);
+        CAMSPORK_REQUIRE_CMP(bits, !=, 0, "Require exactly one qual-tl bit set");
         uint8_t bit_index = get_low_bit_index(bits);
-        assert(bits == 1u << bit_index);
+        CAMSPORK_REQUIRE_CMP(bits, ==, 1u << bit_index, "Require exactly one qual-tl bit set");
         return bit_index;
     }
 

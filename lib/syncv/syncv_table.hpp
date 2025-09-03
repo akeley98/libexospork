@@ -55,13 +55,14 @@ struct VisRecordDebugData
 SyncvTable* new_syncv_table(const syncv_init_t& init);
 SyncvTable* copy_syncv_table(const SyncvTable* table);
 void delete_syncv_table(SyncvTable* table);
-void on_r(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set);
-void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set);
-void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set);
+void on_r(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield);
+void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield);
+void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield);
 void clear_visibility(SyncvTable* table, size_t N, assignment_record_id* array);
 void alloc_barriers(SyncvTable* table, size_t N, barrier_id* barriers);
 void free_barriers(SyncvTable* table, size_t N, barrier_id* barriers);
-void on_fence(SyncvTable* table, TlSigInterval V1, TlSigInterval V2_full, TlSigInterval V2_temporal, bool transitive);
+void on_fence(SyncvTable* table, bool transitive, const ThreadCuboid& cuboid,
+        uint32_t L1_bitfield, uint32_t L2_full_bitfield, uint32_t L2_temporal_bitfield);
 void on_arrive(SyncvTable* table, barrier_id* bar, TlSigInterval V1, bool transitive);
 void on_await(SyncvTable* table, barrier_id* bar, TlSigInterval V2_full, TlSigInterval V2_temporal);
 void begin_no_checking(SyncvTable* table);

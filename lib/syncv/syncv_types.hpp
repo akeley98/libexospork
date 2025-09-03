@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <stdint.h>
 
+#include "tl_sig.hpp"
+#include "../util/cuboid_util.hpp"
 #include "../util/require.hpp"
 
 namespace camspork
@@ -111,9 +113,6 @@ struct ThreadCuboid
         return prod;
     };
 
-    // TODO add TlSigInput and replace TlSigInterval.
-    TlSigInterval with_timeline(uint32_t bitfield) const;
-
     // Initialize (end-begin)-dimensional domain with all threads active
     // i.e. offset = 0, box = domain.
     template <typename Iterator>
@@ -133,6 +132,35 @@ struct ThreadCuboid
             cuboid.box_data[i] = c;
         }
         return cuboid;
+    }
+
+    // Wrapper around cuboid_to_intervals
+    template <typename Callback>
+    void to_intervals(Callback&& callback) const
+    {
+        const uint32_t task_offset = domain_num_threads() * task_index;
+        cuboid_to_intervals<uint32_t>(
+            domain(), domain() + dim(), offset(), offset() + dim(), box(), box() + dim(),
+            [&callback, task_offset] (uint32_t local_lo, uint32_t local_hi)
+            {
+                callback(task_offset + local_lo, task_offset + local_hi);
+            }
+        );
+    }
+
+    TlSigInterval minimal_superset_interval(uint32_t bitfield) const
+    {
+        const uint32_t task_offset = domain_num_threads() * task_index;
+        uint32_t tid_lo = task_offset;
+        uint32_t tid_hi = task_offset;
+        for (uint32_t dim_idx = 0; dim_idx < dim(); ++dim_idx) {
+            const uint32_t domain_c = domain()[dim_idx];
+            const uint32_t offset_c = offset()[dim_idx];
+            const uint32_t box_c = box()[dim_idx];
+            tid_lo = tid_lo * domain_c + offset_c;
+            tid_hi = tid_lo * domain_c + offset_c + box_c;
+        }
+        return TlSigInterval{tid_lo, tid_hi, bitfield};
     }
 };
 

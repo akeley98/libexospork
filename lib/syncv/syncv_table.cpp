@@ -24,30 +24,6 @@ template <typename V> using Set = std::unordered_set<V>;
 namespace camspork
 {
 
-// TODO remove me
-TlSigInterval ThreadCuboid::with_timeline(uint32_t bitfield) const
-{
-    bool have_result = false;
-    TlSigInterval result;
-    result.bitfield = bitfield;
-    const uint32_t task_offset = domain_num_threads() * task_index;
-
-    cuboid_to_intervals<uint32_t>(
-        domain(), domain() + dim(),
-        offset(), offset() + dim(),
-        box(), box() + dim(),
-        [&] (uint32_t lo, uint32_t hi)
-        {
-            CAMSPORK_REQUIRE(!have_result, "TODO: implement non-contiguous linearized thread IDs");
-            have_result = true;
-            result.tid_lo = lo + task_offset;
-            result.tid_hi = hi + task_offset;
-        }
-    );
-    CAMSPORK_REQUIRE(have_result, "unexpected empty thread set");
-    return result;
-}
-
 namespace
 {
 
@@ -673,24 +649,26 @@ struct SyncvTable
         return false;
     }
 
-    // Allocate a new visibility record whose visibility set consists of one interval.
+    // Allocate a new visibility record.
     // This will later need to be added to the memoization table.
+    // This must be kept in-sync with equal(const VisRecord& a, const ThreadCuboid& cuboid, uint32_t bitfield).
     template <bool IsMutate>
-    nodepool::id<VisRecordListNode<IsMutate>> alloc_visibility_record(TlSigInterval init_interval)
+    nodepool::id<VisRecordListNode<IsMutate>> alloc_visibility_record(
+            const ThreadCuboid& cuboid, uint32_t bitfield)
     {
-        assert(init_interval.tid_hi > init_interval.tid_lo);
-
-        nodepool::id<TlSigIntervalListNode> tl_sigs_id;
-        TlSigIntervalListNode& tl_sigs_node = alloc_default_node(&tl_sigs_id);
-        tl_sigs_node.data = init_interval;
-
         nodepool::id<VisRecordListNode<IsMutate>> vis_record_id;
         VisRecordListNode<IsMutate>& vis_record = alloc_default_node(&vis_record_id);
         vis_record.refcnt = 1;
-        vis_record.base_data.original_qual_tl = init_interval.get_unique_qual_tl();
-        vis_record.base_data.visibility_set = tl_sigs_id;
+        vis_record.base_data.original_qual_tl = TlSigInterval::get_unique_qual_tl(bitfield);
 
-        assert(equal(vis_record.base_data, init_interval));
+        // Initialize visibility set = linked list of intervals generated from the initial thread cuboid.
+        nodepool::id<TlSigIntervalListNode>* p_node_id = &vis_record.base_data.visibility_set;
+        cuboid.to_intervals([&] (uint32_t tid_lo, uint32_t tid_hi)
+        {
+            TlSigIntervalListNode& tl_sigs_node = alloc_default_node(p_node_id);
+            tl_sigs_node.data = TlSigInterval{tid_lo, tid_hi, bitfield};
+            p_node_id = &tl_sigs_node.camspork_next_id;
+        });
 
         return vis_record_id;
     }
@@ -896,22 +874,33 @@ struct SyncvTable
 
     // Check if a visibility record matches what would have been constructed
     // from the given tl_sig interval set by alloc_visibility_record.
-    bool equal(const VisRecord& a, TlSigInterval interval)
+    bool equal(const VisRecord& a, const ThreadCuboid& cuboid, uint32_t bitfield)
     {
         static_assert(sizeof(a) == 12, "Update me");
-
-        // Must not have empty visibility set (forwarding state passed?)
-        assert(a.visibility_set);
 
         if (a.pending_await_list) {
             return false;
         }
 
-        // Check if only one interval, and it equals the input interval, with correct original qual-tl.
-        const TlSigIntervalListNode& node = get(a.visibility_set);
-        return !node.camspork_next_id
-                 && node.data == interval
-                 && (interval.qual_bits() >> a.original_qual_tl == 1u);
+        if (TlSigInterval::qual_bits(bitfield) != (1u << a.original_qual_tl)) {
+            return false;
+        }
+
+        // Check if existing intervals equal those that would be generated from ThreadCuboid.
+        nodepool::id<TlSigIntervalListNode> node_id = a.visibility_set;
+        bool equal = true;
+        cuboid.to_intervals([&] (uint32_t tid_lo, uint32_t tid_hi)
+        {
+            if (node_id == 0) {
+                equal = false;
+            }
+            else {
+                const TlSigIntervalListNode& node = get(node_id);
+                equal &= node.data == TlSigInterval{tid_lo, tid_hi, bitfield};
+                node_id = node.camspork_next_id;
+            }
+        });
+        return equal && !node_id;
     }
 
     template <bool OrderedOnly, bool Transitive>
@@ -940,6 +929,7 @@ struct SyncvTable
     // Check if the visibility record is visible-to an access with the given tl_sig access set.
     bool visible_to(const VisRecord& vis_record, TlSigInterval accessor_set)
     {
+        // TODO remove
         return visible_to_impl<true, true>(vis_record, accessor_set);
     }
 
@@ -947,7 +937,78 @@ struct SyncvTable
     template <bool Transitive>
     bool synchronizes_with(const VisRecord& vis_record, TlSigInterval V1)
     {
+        // TODO remove
         return visible_to_impl<false, Transitive>(vis_record, V1);
+    }
+
+    template <bool Transitive>
+    bool synchronizes_with(const VisRecord& vis_record, const ThreadCuboid& cuboid, uint32_t bitfield)
+    {
+        // Check for any intersections between TlSigIntervals generated by ThreadCuboid + bitfield
+        // and those stored in the VisRecord. We check the unordered visibility set.
+        bool intersects = false;
+        nodepool::id<TlSigIntervalListNode> node_id = vis_record.visibility_set;
+        cuboid.to_intervals([&] (uint32_t tid_lo, uint32_t tid_hi)
+        {
+            while (true) {
+                if (!node_id) {
+                    return;  // Exit lambda
+                }
+                const TlSigIntervalListNode& node = get(node_id);
+                TlSigInterval vis_set_interval = node.data;
+                TlSigInterval gen_interval{tid_lo, tid_hi, bitfield};
+                if (vis_set_interval.vis_level() >= vis_level_unordered) {
+                    intersects |= vis_set_interval.intersects(gen_interval);
+                }
+                if (vis_set_interval.tid_hi > tid_hi) {
+                    // Keep checking new vis_set_interval against gen_interval until the visibility set interval
+                    // has a tid_hi above that of the generated interval (from the ThreadCuboid).
+                    // NB on this code path node_id is not updated,
+                    // so vis_set_interval will be checked against a new gen_interval.
+                    return;
+                }
+                node_id = node.camspork_next_id;
+            }
+        });
+        return intersects;
+    }
+
+    bool visible_to(const VisRecord& vis_record, const ThreadCuboid& cuboid, uint32_t bitfield)
+    {
+        // Check that all threads generated by the ThreadCuboid have at least one qual-tl in common with
+        // an overlapping interval in the ordered visibility set of the vis_record.
+        const uint32_t want_qual_bits = TlSigInterval::qual_bits(bitfield);
+        bool all_visible = true;
+        cuboid.to_intervals([&] (uint32_t tid_lo, uint32_t tid_hi)
+        {
+            nodepool::id<TlSigIntervalListNode> node_id = vis_record.visibility_set;
+            // Interval of threads [missing_threads_lo, tid_hi) not yet found to overlap with
+            // a valid TlSigInterval in the visibility set.
+            uint32_t missing_threads_lo = tid_lo;
+
+            while (node_id) {
+                // Search TlSigIntervals in the VisRecord, skipping any that don't have
+                // the required vis_level or with no qual-tl in common.
+                const TlSigIntervalListNode& node = get(node_id);
+                node_id = node.camspork_next_id;
+                const TlSigInterval data = node.data;
+                if (data.vis_level() < vis_level_ordered) {
+                    continue;
+                }
+                if (0 == (data.qual_bits() & want_qual_bits)) {
+                    continue;
+                }
+                // If the interval is after the interval of missing threads, we have found a gap
+                // [missing_threads_lo, data.tid_lo) that is not found. We fail at this point (break out of loop).
+                if (data.tid_lo > missing_threads_lo) {
+                    break;
+                }
+                missing_threads_lo = data.tid_hi;
+            }
+            const bool local_visible = missing_threads_lo >= tid_hi;
+            all_visible &= local_visible;
+        });
+        return all_visible;
     }
 
 
@@ -1298,25 +1359,26 @@ struct SyncvTable
 
     struct NewVisRecordCommand
     {
-        TlSigInterval init_interval;
+        const ThreadCuboid* p_cuboid;
+        uint32_t bitfield;
         uint32_t added_refcnt;
     };
 
-    // Add a new visibility record, or return existing memoized one, constructed from the given tl_sig interval set.
+    // Add a new visibility record, or return existing memoized one, constructed from the given thread cuboid
+    // + bitfield (in TlSigInterval format).
     // The returned ID is an owning reference (ownership count given by added_refcnt).
     template <bool IsMutate>
-    [[nodiscard]] nodepool::id<VisRecordListNode<IsMutate>> memoize_new_vis_record(TlSigInterval init_interval,
+    [[nodiscard]] nodepool::id<VisRecordListNode<IsMutate>> memoize_new_vis_record(const ThreadCuboid& cuboid,
+                                                                                   uint32_t bitfield,
                                                                                    uint32_t added_refcnt)
     {
-        assert(init_interval.tid_hi > init_interval.tid_lo);
-        assert(init_interval.qual_bits() != 0);
         assert(added_refcnt != 0);
 
-        NewVisRecordCommand command{init_interval, added_refcnt};
+        NewVisRecordCommand command{&cuboid, bitfield, added_refcnt};
         nodepool::id<VisRecordListNode<IsMutate>> id =
-                for_buckets<IsMutate, BucketProcessType::Insert>(init_interval, command);
+                for_buckets<IsMutate, BucketProcessType::Insert>(cuboid.minimal_superset_interval(bitfield), command);
         assert(id);
-        assert(equal(const_resolve_forwarding(id), init_interval));
+        assert(equal(const_resolve_forwarding(id), cuboid, bitfield));
         return id;
     }
 
@@ -1325,7 +1387,7 @@ struct SyncvTable
                                                              NewVisRecordCommand command)
     {
         auto lambda = [this, command] (const VisRecord& record) {
-            return equal(record, command.init_interval);
+            return equal(record, *command.p_cuboid, command.bitfield);
         };
         nodepool::id<VisRecordListNode<IsMutate>>* p_found_id = bucket_search(p_bucket_head, lambda);
 
@@ -1339,7 +1401,7 @@ struct SyncvTable
         }
         else {
             // Add memoized base visibility set entry to bucket of memoization table.
-            new_id = alloc_visibility_record<IsMutate>(command.init_interval);
+            new_id = alloc_visibility_record<IsMutate>(*command.p_cuboid, command.bitfield);
             assert(!get(new_id).camspork_next_id);
             get(new_id).refcnt = command.added_refcnt;
             assert(!get(new_id).is_forwarded());
@@ -1481,17 +1543,26 @@ struct SyncvTable
     template <bool Transitive>
     struct FenceUpdateCommand
     {
-        TlSigInterval V1;
-        TlSigInterval V2_full;
-        TlSigInterval V2_temporal;
+        const ThreadCuboid* p_cuboid;
+        uint32_t L1_bitfield, L2_full_bitfield, L2_temporal_bitfield;
 
         template <bool IsMutate>
         void update_for_sync(SyncvTable& env, VisRecord* p_record) const
         {
-            if (env.synchronizes_with<Transitive>(*p_record, V1)) {
-                env.union_tl_sig_interval(p_record, IsMutate ? V2_full : V2_temporal);
+            if (env.synchronizes_with<Transitive>(*p_record, *p_cuboid, L1_bitfield)) {
+                p_cuboid->to_intervals([&] (uint32_t tid_lo, uint32_t tid_hi)
+                    {
+                        const auto bitfield = IsMutate ? L2_full_bitfield : L2_temporal_bitfield;
+                        env.union_tl_sig_interval(p_record, TlSigInterval{tid_lo, tid_hi, bitfield});
+                    }
+                );
             }
         };
+
+        TlSigInterval minimal_superset_interval() const
+        {
+            return p_cuboid->minimal_superset_interval(L1_bitfield);
+        }
     };
 
     template <bool Transitive>
@@ -1506,6 +1577,11 @@ struct SyncvTable
             if (env.synchronizes_with<Transitive>(*p_record, V1)) {
                 env.add_pending_await(p_record, await_id);
             }
+        }
+
+        TlSigInterval minimal_superset_interval() const
+        {
+            return V1;
         }
     };
 
@@ -1524,6 +1600,11 @@ struct SyncvTable
                 env.union_tl_sig_interval(p_record, IsMutate ? V2_full : V2_temporal);
             }
         }
+
+        TlSigInterval minimal_superset_interval() const
+        {
+            return V1;
+        }
     };
 
     // Big payoff for all this code: function that performs the effects of a synchronization statement with the given
@@ -1536,7 +1617,7 @@ struct SyncvTable
     {
         // Only visibility sets that intersect the first visibility set (V1) can be updated by this sync.
         // This is even the case for Await, assuming the V1 for the corresponding Arrive was correctly given.
-        const TlSigInterval minimal_superset = command.V1;
+        const TlSigInterval minimal_superset = command.minimal_superset_interval();
         for_buckets<false, BucketProcessType::MapAll>(minimal_superset, command);
         for_buckets<true, BucketProcessType::MapAll>(minimal_superset, command);
     }
@@ -1594,20 +1675,17 @@ struct SyncvTable
     }
 
     // Augment all visibility records that synchronize with the first visibility set of the fence.
-    void update_vis_records_for_fence(
-            TlSigInterval V1,
-            TlSigInterval V2_full,
-            TlSigInterval V2_temporal,
-            bool transitive)
+    void update_vis_records_for_fence(bool transitive, const ThreadCuboid& cuboid,
+            uint32_t L1_bitfield, uint32_t L2_full_bitfield, uint32_t L2_temporal_bitfield)
     {
-        V2_full.bitfield |= TlSigInterval::ordered_bits;  // Augment V_A, V_U, and V_O.
-        V2_temporal.bitfield |= TlSigInterval::ordered_bits;
+        L2_full_bitfield |= TlSigInterval::ordered_bits;  // Augment V_A, V_U, and V_O.
+        L2_temporal_bitfield |= TlSigInterval::ordered_bits;
         if (transitive) {
-            FenceUpdateCommand<true> command{V1, V2_full, V2_temporal};
+            FenceUpdateCommand<true> command{&cuboid, L1_bitfield, L2_full_bitfield, L2_temporal_bitfield};
             update_vis_records_for_sync_impl(command);
         }
         else {
-            FenceUpdateCommand<false> command{V1, V2_full, V2_temporal};
+            FenceUpdateCommand<false> command{&cuboid, L1_bitfield, L2_full_bitfield, L2_temporal_bitfield};
             update_vis_records_for_sync_impl(command);
         }
     }
@@ -1668,10 +1746,11 @@ struct SyncvTable
 
 
 
-    void on_fence(TlSigInterval V1, TlSigInterval V2_full, TlSigInterval V2_temporal, bool transitive)
+    void on_fence(bool transitive, const ThreadCuboid& cuboid,
+            uint32_t L1_bitfield, uint32_t L2_full_bitfield, uint32_t L2_temporal_bitfield)
     {
         augment_counter++;
-        update_vis_records_for_fence(V1, V2_full, V2_temporal, transitive);
+        update_vis_records_for_fence(transitive, cuboid, L1_bitfield, L2_full_bitfield, L2_temporal_bitfield);
     }
 
     void on_arrive(barrier_id* bar, TlSigInterval V1, bool transitive)
@@ -1712,16 +1791,18 @@ struct SyncvTable
 
 
     template <bool IsMutate, bool UpdateRecords>
-    void checked_on_access_impl(size_t N,
-                                assignment_record_id* p_assignment_record_ids,
-                                TlSigInterval accessor_set)
+    void checked_on_access_impl(
+            size_t N,
+            assignment_record_id* p_assignment_record_ids,
+            const ThreadCuboid& cuboid,
+            uint32_t bitfield)
     {
         // We will memoize the new visibility record once
         if (N == 0) {
             return;
         }
         nodepool::id<VisRecordListNode<IsMutate>> vis_record_id =
-                memoize_new_vis_record<IsMutate>(accessor_set, uint32_t(N));
+                memoize_new_vis_record<IsMutate>(cuboid, bitfield, uint32_t(N));
 
         for (size_t i = 0; i < N; ++i) {
             AssignmentRecord& assignment_record = lazy_from_api(p_assignment_record_ids + i);
@@ -1731,7 +1812,7 @@ struct SyncvTable
             while (mutate_id) {
                 AssignmentRecordMutateNode& node = get(mutate_id);
                 const VisRecord& mutate_record = remove_forwarding(&node.vis_record_id);
-                if (!visible_to(mutate_record, accessor_set)) {
+                if (!visible_to(mutate_record, cuboid, bitfield)) {
                     thread_local_message_ref() = IsMutate ? "WAW Hazard" : "RAW Hazard";
                     throw SyncvCheckFail{};
                 }
@@ -1744,7 +1825,7 @@ struct SyncvTable
                 while (read_id) {
                     AssignmentRecordReadNode& node = get(read_id);
                     const VisRecord& read_record = remove_forwarding(&node.vis_record_id);
-                    if (!visible_to(read_record, accessor_set)) {
+                    if (!visible_to(read_record, cuboid, bitfield)) {
                         thread_local_message_ref() = "WAR Hazard";
                         throw SyncvCheckFail{};
                     }
@@ -1788,28 +1869,28 @@ struct SyncvTable
         }
     }
 
-    void on_r(size_t N, assignment_record_id* p_assignment_record_ids, TlSigInterval accessor_set)
+    void on_r(size_t N, assignment_record_id* p_assignment_record_ids, const ThreadCuboid& cuboid, uint32_t bitfield)
     {
         if (no_checking_counter == 0) {
-            checked_on_access_impl<false, true>(N, p_assignment_record_ids, accessor_set);
+            checked_on_access_impl<false, true>(N, p_assignment_record_ids, cuboid, bitfield);
         }
     }
 
-    void on_rw(size_t N, assignment_record_id* p_assignment_record_ids, TlSigInterval accessor_set)
+    void on_rw(size_t N, assignment_record_id* p_assignment_record_ids, const ThreadCuboid& cuboid, uint32_t bitfield)
     {
         assignment_counter++;
         if (no_checking_counter == 0) {
-            checked_on_access_impl<true, true>(N, p_assignment_record_ids, accessor_set);
+            checked_on_access_impl<true, true>(N, p_assignment_record_ids, cuboid, bitfield);
         }
         else {
             clear_visibility(N, p_assignment_record_ids);
         }
     }
 
-    void on_check_free(size_t N, assignment_record_id* p_assignment_record_ids, TlSigInterval accessor_set)
+    void on_check_free(size_t N, assignment_record_id* p_assignment_record_ids, const ThreadCuboid& cuboid, uint32_t bitfield)
     {
         if (no_checking_counter == 0) {
-            checked_on_access_impl<true, false>(N, p_assignment_record_ids, accessor_set);
+            checked_on_access_impl<true, false>(N, p_assignment_record_ids, cuboid, bitfield);
         }
     }
 
@@ -2210,24 +2291,24 @@ void SyncvTableDeleter::operator() (SyncvTable* victim) const
     delete victim;
 }
 
-void on_r(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set)
+void on_r(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield)
 {
     INTERFACE_PROLOGUE(table)
-    table->on_r(N, array, accessor_set);
+    table->on_r(N, array, cuboid, bitfield);
     INTERFACE_EPILOGUE(table)
 }
 
-void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set)
+void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield)
 {
     INTERFACE_PROLOGUE(table)
-    table->on_rw(N, array, accessor_set);
+    table->on_rw(N, array, cuboid, bitfield);
     INTERFACE_EPILOGUE(table)
 }
 
-void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, TlSigInterval accessor_set)
+void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield)
 {
     INTERFACE_PROLOGUE(table)
-    table->on_check_free(N, array, accessor_set);
+    table->on_check_free(N, array, cuboid, bitfield);
     INTERFACE_EPILOGUE(table)
 }
 
@@ -2252,10 +2333,11 @@ void free_barriers(SyncvTable* table, size_t N, barrier_id* barriers)
     INTERFACE_EPILOGUE(table)
 }
 
-void on_fence(SyncvTable* table, TlSigInterval V1, TlSigInterval V2_full, TlSigInterval V2_temporal, bool transitive)
+void on_fence(SyncvTable* table, bool transitive, const ThreadCuboid& cuboid,
+        uint32_t L1_bitfield, uint32_t L2_full_bitfield, uint32_t L2_temporal_bitfield)
 {
     INTERFACE_PROLOGUE(table)
-    table->on_fence(V1, V2_full, V2_temporal, transitive);
+    table->on_fence(transitive, cuboid, L1_bitfield, L2_full_bitfield, L2_temporal_bitfield);
     INTERFACE_EPILOGUE(table)
 }
 

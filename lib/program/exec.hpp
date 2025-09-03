@@ -206,7 +206,7 @@ class ProgramEnv
     std::shared_ptr<const char[]> p_program_buffer;
     const ProgramHeader& header;  // Validated from p_program_buffer
     ProgramEnvSyncvTable p_syncv_table;
-    ThreadCuboid thread_cuboid;  // Lazy task_index. Read with prepare_tl_sig_input.
+    ThreadCuboid raw_thread_cuboid;  // Lazy task_index. Read with prepare_thread_cuboid.
     std::vector<VarSlotEnvs> var_slots;
     bool dirty_task_index = false;
 
@@ -297,13 +297,13 @@ class ProgramEnv
         return p_result;
     }
 
-    TlSigInterval prepare_tl_sig_input(uint32_t bitfield)
+    const ThreadCuboid& prepare_thread_cuboid()
     {
         if (dirty_task_index) {
-            thread_cuboid.task_index++;
+            raw_thread_cuboid.task_index++;
             dirty_task_index = false;
         }
-        return thread_cuboid.with_timeline(bitfield);
+        return raw_thread_cuboid;
     }
 };
 
