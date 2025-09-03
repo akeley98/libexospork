@@ -49,15 +49,31 @@ struct VisRecordDebugData
     std::vector<pending_await_t> pending_await_list;
 };
 
+// Window into a multidimensional array of assignment records.
+// The outer-extents array gives the size of the base array.
+// The offset and inner extents gives the location and size of the window.
+struct AssignmentRecordWindow
+{
+    assignment_record_id* base;
+    const uint32_t* begin_outer_extent;
+    const uint32_t* end_outer_extent;
+    const uint32_t* begin_offset;
+    const uint32_t* end_offset;
+    const uint32_t* begin_inner_extent;
+    const uint32_t* end_inner_extent;
+};
+
 
 
 // *** Primary Implemented Interface ***
 SyncvTable* new_syncv_table(const syncv_init_t& init);
 SyncvTable* copy_syncv_table(const SyncvTable* table);
 void delete_syncv_table(SyncvTable* table);
-void on_r(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield);
-void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield);
-void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield);
+void on_r(SyncvTable* table, assignment_record_id* p_record, const ThreadCuboid& cuboid, uint32_t bitfield);
+void on_rw(SyncvTable* table, assignment_record_id* p_record, const ThreadCuboid& cuboid, uint32_t bitfield);
+void on_r(SyncvTable* table, AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield);
+void on_rw(SyncvTable* table, AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield);
+void on_check_free(SyncvTable* table, AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield);
 void clear_visibility(SyncvTable* table, size_t N, assignment_record_id* array);
 void alloc_barriers(SyncvTable* table, size_t N, barrier_id* barriers);
 void free_barriers(SyncvTable* table, size_t N, barrier_id* barriers);

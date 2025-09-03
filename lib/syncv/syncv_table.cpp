@@ -1,6 +1,7 @@
 #include "syncv_table.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <functional>
 #include <memory>
@@ -8,6 +9,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 
 #include "tl_sig.hpp"
 #include "../util/bit_util.hpp"
@@ -140,6 +143,10 @@ using AssignmentRecordMutateNode = AssignmentRecordVisNode<true>;
 // Assignment record: collection of mutate visibility records + collection of read visibility records.
 // This is associated for each position (scalar, or value in a tensor)
 // of the program undergoing synchronization validation.
+//
+// Multiple positions may reference the same assignment record.
+// We implement a copy-on-write strategy (exception: may modify in-place if no one will hold
+// a reference to the old assignment record anymore).
 struct AssignmentRecord
 {
     nodepool::id<AssignmentRecord> camspork_next_id{0};
@@ -151,11 +158,8 @@ struct AssignmentRecord
     // Zero or more read visibility records.
     nodepool::id<AssignmentRecordReadNode> read_vis_records_head_id{0};
 
-    // Unique ID for this assignment
-    uint64_t assignment_id : 52;
-
     // See assignment_record_remove_duplicates.
-    uint64_t last_augment_counter_bits : 12;
+    uint32_t last_augment_counter_bits : 16;
 
     refcnt_t get_refcnt() const
     {
@@ -197,7 +201,7 @@ struct IntervalBucketParentPointer
     {
         child_index_in_parent = other.child_index_in_parent;
         p_parent = new_parent;
-        assert(new_parent);
+        CAMSPORK_REQUIRE(new_parent, "Expected parent pointer");
     }
 };
 
@@ -271,7 +275,7 @@ struct IntervalBucket : IntervalBucketParentPointer<IsMutate, BucketLevel>
         nonempty_child_count = other.nonempty_child_count;
         bucket = other.bucket;
         visitor_count = other.visitor_count;
-        assert(visitor_count == 0);  // Not sure copying is OK while being traversed.
+        CAMSPORK_REQUIRE_CMP(visitor_count, ==, 0, "Not sure copying is OK while being traversed.");
     }
 };
 
@@ -304,7 +308,7 @@ struct IntervalBucket<IsMutate, 1> : IntervalBucketParentPointer<IsMutate, 1>
         nonempty_child_count = other.nonempty_child_count;
         bucket = other.bucket;
         visitor_count = other.visitor_count;
-        assert(visitor_count == 0);  // Not sure copying is OK while being traversed.
+        CAMSPORK_REQUIRE_CMP(visitor_count, ==, 0, "Not sure copying is OK while being traversed.");
     }
 };
 
@@ -331,23 +335,29 @@ void delete_interval_bucket_if_empty(IntervalBucket<IsMutate, BucketLevel>* p) n
 {
     if (interval_bucket_is_empty(*p)) {
         for (const auto& child : p->child_interval_buckets) {
-            assert(!child);  // nonempty_child_count was wrong.
+            CAMSPORK_REQUIRE(!child, "nonempty_child_count was wrong.");
         }
 
         if constexpr (BucketLevel < bucket_level_count - 1) {
             // Parent pointer should be correct.
             IntervalBucket<IsMutate, BucketLevel + 1>* p_parent = p->p_parent;
-            assert(p_parent);
+            CAMSPORK_REQUIRE(p_parent, "missing parent ptr");
             const uint32_t child_index = p->child_index_in_parent;
-            assert(child_index < p_parent->child_count);
-            assert(p_parent->nonempty_child_count > 0);
+            CAMSPORK_REQUIRE_CMP(child_index, <, p_parent->child_count, "child_index out-of-range");
+            CAMSPORK_REQUIRE_CMP(p_parent->nonempty_child_count, >, 0, "should have been deallocated");
 
             // p is invalidated after this (unique_ptr reset).
-            assert(p_parent->child_interval_buckets[child_index].get() == p);
+            CAMSPORK_REQUIRE_CMP(p_parent->child_interval_buckets[child_index].get(), ==, p, "???");
             p_parent->child_interval_buckets[child_index].reset();
         }
     }
 }
+
+struct AssignmentRecordCensusEntry
+{
+    uint32_t count = 0;
+    nodepool::id<AssignmentRecord> new_node_id{};
+};
 
 }  // end namespace
 
@@ -375,9 +385,7 @@ struct SyncvTable
     uint32_t no_checking_counter = 0;
 
     // Counters for operations
-    uint64_t assignment_counter = 0;  // Write counter
     uint64_t augment_counter = 0;     // Number of fence+arrive
-    uint64_t operation_counter = 0;   // All operations counter
 
     // Memory pool state.
     uintptr_t original_memory_budget = 0;
@@ -405,9 +413,6 @@ struct SyncvTable
     // Ordinarily we rely on the user alone to remember these arrays, but we need to cache them if we are
     // doing consistency checks.
     Map<assignment_record_id*, size_t> debug_registered_assignment_records;
-
-    uint64_t debug_assignment_id = 0;
-    uint64_t debug_operation_id = 0;
 
 
 
@@ -457,7 +462,7 @@ struct SyncvTable
     void remove_and_free_next_node(nodepool::id<ListNode>* p_id) noexcept
     {
         nodepool::id<ListNode> victim_id = remove_next_node(p_id);
-        assert(!get(victim_id).camspork_next_id);  // Should have been removed from list
+        CAMSPORK_REQUIRE(!get(victim_id).camspork_next_id, "Should have been removed from list");
         extend_free_list(victim_id);               // so this free only adds 1 node to free chain.
     }
 
@@ -496,25 +501,23 @@ struct SyncvTable
     void incref(nodepool::id<AssignmentRecord> id) noexcept
     {
         AssignmentRecord& node = get(id);
-        assert(node.refcnt != 0);
+        CAMSPORK_REQUIRE_CMP(node.refcnt, !=, 0, "should not have started with 0 refcnt");
         node.refcnt++;
-        assert(node.refcnt != 0);  // Overflow check
+        CAMSPORK_REQUIRE_CMP(node.refcnt, !=, 0, "reference count overflow");
     }
 
     // Decrement reference count of assignment record.
-    void decref(nodepool::id<AssignmentRecord> id) noexcept
+    void decref(nodepool::id<AssignmentRecord> id, uint32_t nref = 1) noexcept
     {
-        nodepool::id<AssignmentRecord> next{0};
-        assert(id);
+        CAMSPORK_REQUIRE(id, "decref(0)");
         AssignmentRecord& node = get(id);
-        if (0 == --node.refcnt) {
+        CAMSPORK_REQUIRE_CMP(nref, <=, node.refcnt, "tried to decref more than the refcnt");
+        node.refcnt -= nref;
+        if (0 == node.refcnt) {
             reset_assignment_record(&node);
-            next = node.camspork_next_id;
+            CAMSPORK_REQUIRE(!node.camspork_next_id, "Unexpected: AssignmentRecord next only used for free list");
             node.camspork_next_id._1_index = 0;
             extend_free_list(id);
-        }
-        if (next) {
-            decref(next);
         }
     }
 
@@ -523,9 +526,9 @@ struct SyncvTable
     void incref(nodepool::id<VisRecordListNode<IsMutate>> id) noexcept
     {
         VisRecordListNode<IsMutate>& node = get(id);
-        assert(node.refcnt != 0);
+        CAMSPORK_REQUIRE_CMP(node.refcnt, !=, 0, "should not have started with 0 refcnt");
         node.refcnt++;
-        assert(node.refcnt != 0);  // Overflow check
+        CAMSPORK_REQUIRE_CMP(node.refcnt, !=, 0, "reference count overflow");
     }
 
     // Decrement reference count of visibility record,
@@ -533,38 +536,25 @@ struct SyncvTable
     template <bool IsMutate>
     void decref(nodepool::id<VisRecordListNode<IsMutate>> id) noexcept
     {
-        assert(id);
+        CAMSPORK_REQUIRE(id, "decref(0)");
         VisRecordListNode<IsMutate>& node = get(id);
         if (0 == --node.refcnt) {
             if (node.is_forwarded()) {
                 // Add physical storage of victim visibility record to free chain,
                 // then decref owning reference to forwarded-to visibility record,
                 auto fwd_id = node.camspork_next_id;
-                assert(fwd_id);
+                CAMSPORK_REQUIRE(fwd_id, "reporting forwarding state but not forwarded anywhere");
                 free_single_vis_record(id);
                 decref(fwd_id);  // Hope for tail call.
             }
             else {
                 // Non-forwarded (base) visibility record must be removed from memoization first.
                 auto memoized_id = remove_memoized(&node);
-                assert(id == memoized_id);
-                assert(get(memoized_id).camspork_next_id == 0);  // Should have been removed from bucket's list.
+                CAMSPORK_REQUIRE_CMP(id, ==, memoized_id, "should have been found in memoization table");
+                CAMSPORK_REQUIRE_CMP(get(memoized_id).camspork_next_id, ==, 0, "Should have been removed from bucket's list.");
                 free_single_vis_record(memoized_id);
             }
         }
-    }
-
-    AssignmentRecord& lazy_from_api(assignment_record_id* p_api_value)
-    {
-        nodepool::id<AssignmentRecord> node_id;
-        node_id._1_index = p_api_value->node_id;
-        if (!node_id) {
-            AssignmentRecord& node = alloc_default_node(&node_id);
-            node.refcnt = 1;
-            p_api_value->node_id = node_id._1_index;
-            return node;
-        }
-        return get(node_id);
     }
 
     void reset_vis_record_data(VisRecord* p_data) noexcept
@@ -580,9 +570,9 @@ struct SyncvTable
     template <bool IsMutate>
     void free_single_vis_record(nodepool::id<VisRecordListNode<IsMutate>> id) noexcept
     {
-        assert(id);
+        CAMSPORK_REQUIRE(id, "unexpected 0 id");
         VisRecordListNode<IsMutate>& node = get(id);
-        assert(node.refcnt == 0);
+        CAMSPORK_REQUIRE_CMP(node.refcnt, ==, 0, "unexpected 0 refcnt");
         reset_vis_record_data(&node.base_data);
         node.camspork_next_id = {};  // Avoid freeing entire list.
         extend_free_list(id);
@@ -611,7 +601,6 @@ struct SyncvTable
         assignment_record_remove_vis_records(p_record->read_vis_records_head_id);
         p_record->read_vis_records_head_id = {};
 
-        p_record->assignment_id = 0;
         p_record->last_augment_counter_bits = 0;
     }
 
@@ -627,7 +616,7 @@ struct SyncvTable
     {
         nodepool::id<PendingAwaitListNode> new_node_id;
         auto& node = alloc_default_node(&new_node_id);
-        assert(!node.camspork_next_id);
+        CAMSPORK_REQUIRE(!node.camspork_next_id, "");
         node.await_id = await_id;
         insert_next_node(&p->pending_await_list, new_node_id);
     }
@@ -679,11 +668,11 @@ struct SyncvTable
     // and vis_level() == vis_level_ordered on an interval means to include it in both V_U and V_O.
     void union_tl_sig_interval(VisRecord* p, TlSigInterval input)
     {
-        assert(input.vis_level() == vis_level_ordered);
+        CAMSPORK_REQUIRE_CMP(input.vis_level(), ==, vis_level_ordered, "Only support vis_level_ordered for now");
 
         // Non-empty input check (cartesian product of non-empty thread interval and non-empty qual-tl set).
-        assert(input.tid_hi > input.tid_lo);
-        assert(0 != input.qual_bits());
+        CAMSPORK_REQUIRE_CMP(input.tid_hi, >, input.tid_lo, "non-empty input check");
+        CAMSPORK_REQUIRE_CMP(0, !=, input.qual_bits(), "non-empty input check");
         using node_id = nodepool::id<TlSigIntervalListNode>;
 
         // Note, assignment of 0, 1, 3, allows for bitwise-or to "promote" to vis_level_ordered.
@@ -707,7 +696,7 @@ struct SyncvTable
             uint32_t gap_tid_hi;
             if (original_next_node_id) {
                 gap_tid_hi = get(original_next_node_id).data.tid_lo;
-                assert(gap_tid_lo <= gap_tid_hi);  // intervals were out of order.
+                CAMSPORK_REQUIRE_CMP(gap_tid_lo, <=, gap_tid_hi, "intervals were out of order.");
             }
             else {
                 gap_tid_hi = input.tid_hi;  // For "gap" after the rightmost interval.
@@ -752,7 +741,7 @@ struct SyncvTable
                 new_node.data.tid_lo = original_data.tid_lo;
                 new_node.data.tid_hi = intersect_tid_lo;
                 new_node.data.bitfield = original_data.bitfield;
-                assert(*p_id == original_next_node_id);
+                CAMSPORK_REQUIRE_CMP(*p_id, ==, original_next_node_id, "linked list corrupt");
                 insert_next_node(p_id, new_node_id);
             }
 
@@ -781,21 +770,21 @@ struct SyncvTable
 
         // Merge redundant intervals
         // For each "current node", we try to merge it with the next node, if it exists.
-        assert(p->visibility_set);
+        CAMSPORK_REQUIRE(p->visibility_set, "unexpected empty visibility set");
         TlSigIntervalListNode* p_current_node = &get(p->visibility_set);
         for (node_id next_id; (next_id = p_current_node->camspork_next_id); ) {
             TlSigIntervalListNode* p_next_node = &get(next_id);
 
             TlSigInterval& current = p_current_node->data;
             const TlSigInterval& next = p_next_node->data;
-            assert(current.tid_lo < current.tid_hi);
-            assert(current.tid_hi <= next.tid_lo);
-            assert(next.tid_lo < next.tid_hi);
+            CAMSPORK_REQUIRE_CMP(current.tid_lo, <, current.tid_hi, "invalid interval");
+            CAMSPORK_REQUIRE_CMP(current.tid_hi, <=, next.tid_lo, "invalid interval overlap");
+            CAMSPORK_REQUIRE_CMP(next.tid_lo, <, next.tid_hi, "invalid interval");
 
             if (current.tid_hi == next.tid_lo && current.bitfield == next.bitfield) {
                 // Merge next node into current node, and remove next node from list.
                 current.tid_hi = next.tid_hi;
-                assert(p_current_node->camspork_next_id == next_id);
+                CAMSPORK_REQUIRE_CMP(p_current_node->camspork_next_id, ==, next_id, "corrupt linked list");
                 remove_and_free_next_node(&p_current_node->camspork_next_id);
             }
             else {
@@ -819,6 +808,7 @@ struct SyncvTable
         static_assert(sizeof(a) == 12, "Update me");
 
         // Must not have empty visibility set (forwarding state passed?)
+        // TODO fix me
         assert(a.visibility_set);
         assert(b.visibility_set);
 
@@ -838,8 +828,8 @@ struct SyncvTable
                 const TlSigIntervalListNode& current_b = get(id_b);
                 id_a = current_a.camspork_next_id;
                 id_b = current_b.camspork_next_id;
-                assert(!id_a || valid_adjacent(current_a.data, get(id_a).data));
-                assert(!id_b || valid_adjacent(current_b.data, get(id_b).data));
+                CAMSPORK_REQUIRE(!id_a || valid_adjacent(current_a.data, get(id_a).data), "invalid adjacent intervals");
+                CAMSPORK_REQUIRE(!id_b || valid_adjacent(current_b.data, get(id_b).data), "invalid adjacent intervals");
 
                 if (current_a.data != current_b.data) {
                     return false;
@@ -907,6 +897,7 @@ struct SyncvTable
     bool visible_to_impl(const VisRecord& vis_record, TlSigInterval access_set)
     {
         // Must not have empty visibility set (forwarding state passed?)
+        // TODO fix me
         assert(vis_record.visibility_set);
 
         const uint32_t qual_bits_mask = Transitive ? ~uint32_t(0) : uint32_t(1) << vis_record.original_qual_tl;
@@ -915,7 +906,7 @@ struct SyncvTable
         while (id) {
             const TlSigIntervalListNode& current_node = get(id);
             id = current_node.camspork_next_id;
-            assert(!id || valid_adjacent(current_node.data, get(id).data));
+            CAMSPORK_REQUIRE(!id || valid_adjacent(current_node.data, get(id).data), "invalid adjacent intervals");
 
             if (current_node.data.intersects(access_set, qual_bits_mask)) {
                 if (!OrderedOnly || current_node.data.vis_level() == vis_level_ordered) {
@@ -1020,15 +1011,15 @@ struct SyncvTable
 
     uint32_t get_barrier_id(const barrier_id* bar)
     {
-        assert(bar->data != 0);
+        CAMSPORK_REQUIRE_CMP(bar->data, !=, 0, "null barrier");
         const auto id = (bar->data - 1);
-        assert(id < max_live_barriers);
+        CAMSPORK_REQUIRE_CMP(id, <, max_live_barriers, "max_live_barriers limit exceeded");
         return uint32_t(id);
     }
 
     void set_barrier_id(barrier_id* bar, uint32_t id)
     {
-        assert(id < max_live_barriers);
+        CAMSPORK_REQUIRE_CMP(id, <, max_live_barriers, "max_live_barriers limit exceeded");
         bar->data = id + 1;
     }
 
@@ -1077,7 +1068,7 @@ struct SyncvTable
 
             uint64_t& word = live_barrier_bits[barrier_id / 64u];
             const uint64_t bit = uint64_t(1) << (barrier_id & 63u);
-            assert((word & bit));  // Barrier ID was not allocated
+            CAMSPORK_REQUIRE_CMP((word & bit), !=, 0, "Barrier ID was not allocated");
             word &= ~bit;
             barriers[i].data = 0;
         }
@@ -1095,7 +1086,7 @@ struct SyncvTable
     // Note, at time of writing the qual_bits aren't used for bucketing, but maybe they should be.
     TlSigInterval minimal_superset_interval(nodepool::id<TlSigIntervalListNode> id) const
     {
-        assert(id);
+        CAMSPORK_REQUIRE(id, "null");
         const TlSigIntervalListNode* p_node = &get(id);
         p_node->data.assert_valid();
         TlSigInterval ret = p_node->data;
@@ -1109,7 +1100,7 @@ struct SyncvTable
             }
 
             p_node = &get(id);
-            assert(p_node->data.tid_lo >= ret.tid_hi);  // Not sorted?
+            CAMSPORK_REQUIRE_CMP(p_node->data.tid_lo, >=, ret.tid_hi, "Not sorted?");
             p_node->data.assert_valid();
             ret.tid_hi = p_node->data.tid_hi;
             ret.bitfield |= p_node->data.bitfield;
@@ -1790,22 +1781,98 @@ struct SyncvTable
 
 
 
-    template <bool IsMutate, bool UpdateRecords>
+    static uint32_t assignment_record_window_size(AssignmentRecordWindow window)
+    {
+        uint32_t prod = 1;
+        for (const uint32_t* p = window.begin_inner_extent; p != window.end_inner_extent; ++p) {
+            prod *= *p;
+        }
+        return prod;
+    }
+
+    static uint32_t assignment_record_window_size(assignment_record_id*)
+    {
+        return 1;
+    }
+
+    // Copy one of the linked lists of VisRecord references in an AssignmentRecord.
+    template <bool IsMutate>
+    nodepool::id<AssignmentRecordVisNode<IsMutate>> copy(nodepool::id<AssignmentRecordVisNode<IsMutate>> input_id)
+    {
+        nodepool::id<AssignmentRecordVisNode<IsMutate>> output_id{};
+        if (input_id) {
+            nodepool::id<AssignmentRecordVisNode<IsMutate>>* p_tail = &output_id;
+            while (input_id) {
+                const AssignmentRecordVisNode<IsMutate>& input_node = get(input_id);
+                AssignmentRecordVisNode<IsMutate>& output_node = alloc_default_node(p_tail);
+                p_tail = &output_node.camspork_next_id;
+                input_id = input_node.camspork_next_id;
+
+                nodepool::id<VisRecordListNode<IsMutate>> vis_record_id = input_node.vis_record_id;
+                output_node.vis_record_id = vis_record_id;
+                incref(vis_record_id);
+            }
+        }
+        return output_id;
+    }
+
+    AssignmentRecord& copy(
+            const AssignmentRecord& old, uint32_t refcnt, nodepool::id<AssignmentRecord>* out_id)
+    {
+        CAMSPORK_REQUIRE_CMP(refcnt, !=, 0, "initial refcnt must not be 0");
+        AssignmentRecord& assignment_record = alloc_default_node(out_id);
+        assignment_record.refcnt = refcnt;
+        assignment_record.last_augment_counter_bits = old.last_augment_counter_bits;
+        assignment_record.mutate_vis_records_head_id = copy(old.mutate_vis_records_head_id);
+        assignment_record.read_vis_records_head_id = copy(old.read_vis_records_head_id);
+        return assignment_record;
+    }
+
+
+    template <bool IsMutate, bool UpdateRecords, typename Input>
     void checked_on_access_impl(
-            size_t N,
-            assignment_record_id* p_assignment_record_ids,
+            Input input,
             const ThreadCuboid& cuboid,
             uint32_t bitfield)
     {
-        // We will memoize the new visibility record once
-        if (N == 0) {
-            return;
+        // We will memoize the new visibility record once.
+        const uint32_t vis_record_refcnt = UpdateRecords ? assignment_record_window_size(input) : 0u;
+        nodepool::id<VisRecordListNode<IsMutate>> vis_record_id{};
+        if (vis_record_refcnt != 0) {
+            vis_record_id = memoize_new_vis_record<IsMutate>(cuboid, bitfield, vis_record_refcnt);
         }
-        nodepool::id<VisRecordListNode<IsMutate>> vis_record_id =
-                memoize_new_vis_record<IsMutate>(cuboid, bitfield, uint32_t(N));
 
-        for (size_t i = 0; i < N; ++i) {
-            AssignmentRecord& assignment_record = lazy_from_api(p_assignment_record_ids + i);
+        using node_id = nodepool::id<AssignmentRecord>;
+
+        // If the input is a window, take a census of all assignment record IDs in the input window.
+        static constexpr bool IsWindow = std::is_same_v<decltype(input), AssignmentRecordWindow>;
+        using CensusMap = Map<node_id, AssignmentRecordCensusEntry>;
+        using TrivialCensus = std::array<std::pair<node_id, AssignmentRecordCensusEntry>, 1>;
+        std::conditional_t<IsWindow, CensusMap, TrivialCensus> census;
+        if constexpr (IsWindow) {
+            cuboid_to_intervals<size_t>(
+                input.begin_outer_extent, input.end_outer_extent,
+                input.begin_offset, input.end_offset,
+                input.begin_inner_extent, input.end_inner_extent,
+                [&] (size_t lo, size_t hi) {
+                    for (size_t i = lo; i < hi; ++i) {
+                        node_id id{input.base[i].node_id};
+                        census[id].count++;
+                    }
+                }
+            );
+        }
+        else {
+            census[0].first = node_id{*input};  // Where decltype(input) is assignment_record_id*
+            census[0].second.count = 1;
+        }
+
+        auto check = [&] (node_id id)
+        {
+            if (!id) {
+                return;
+            }
+            const AssignmentRecord& assignment_record = get(id);
 
             // Check against previous mutate visibility records
             nodepool::id<AssignmentRecordMutateNode> mutate_id = assignment_record.mutate_vis_records_head_id;
@@ -1832,19 +1899,44 @@ struct SyncvTable
                     read_id = node.camspork_next_id;
                 }
             }
+        };
+
+        auto copy_on_write_update = [&] (node_id old_id, AssignmentRecordCensusEntry& entry)
+        {
+            // If the old assignment record has ID 0 (doesn't exist ... was presumed empty, no reads, no mutates)
+            // or its refcnt exceeds the use count, then we cannot modify the assignment record in-place.
+            // Save the ID of the replacement assignment record (new_id), which is the same as the old_id if in-place.
+            bool can_modify = false;
+            AssignmentRecord* p_assignment_record;
+            if (old_id) {
+                AssignmentRecord& old = get(old_id);
+                const auto old_refcnt = old.refcnt;
+                CAMSPORK_REQUIRE_CMP(old_refcnt, >=, entry.count, "corrupt refcnt");
+                can_modify = old_refcnt == entry.count;
+                if (can_modify) {
+                    p_assignment_record = &old;
+                    entry.new_node_id = old_id;
+                }
+                else {
+                    // Make a copy of the old AssignmentRecord, and transfer entry.count owning references
+                    // from the old to the new one.
+                    p_assignment_record = &copy(old, entry.count, &entry.new_node_id);
+                    decref(old_id, entry.count);
+                }
+            }
+            else {
+                p_assignment_record = &alloc_default_node(&entry.new_node_id);
+                p_assignment_record->refcnt = entry.count;
+            }
+            AssignmentRecord& assignment_record = *p_assignment_record;
 
             // Add new visibility record (either as new mutate visibility record, or appended read visibility record).
-            if constexpr (!UpdateRecords) {
-                // Disabled
-            }
             if constexpr (IsMutate) {
                 // Clear out assignment record on write and add the single mutate visibility record.
                 // TODO this will change for atomic operations.
                 reset_assignment_record(&assignment_record);
                 AssignmentRecordMutateNode& node = alloc_default_node(&assignment_record.mutate_vis_records_head_id);
                 node.vis_record_id = vis_record_id;
-                assignment_record.assignment_id = assignment_counter;
-                assert(assignment_record.assignment_id != 0);
                 assignment_record.last_augment_counter_bits = augment_counter;
             }
             else {
@@ -1866,31 +1958,72 @@ struct SyncvTable
                     assignment_record_remove_duplicates(&assignment_record);
                 }
             }
-        }
-    }
+        };
 
-    void on_r(size_t N, assignment_record_id* p_assignment_record_ids, const ThreadCuboid& cuboid, uint32_t bitfield)
-    {
-        if (no_checking_counter == 0) {
-            checked_on_access_impl<false, true>(N, p_assignment_record_ids, cuboid, bitfield);
+        // Check & update all assignment records once.
+        for (auto& pair : census) {
+            check(pair.first);
+            if constexpr (UpdateRecords) {
+                copy_on_write_update(pair.first, pair.second);
+            }
         }
-    }
 
-    void on_rw(size_t N, assignment_record_id* p_assignment_record_ids, const ThreadCuboid& cuboid, uint32_t bitfield)
-    {
-        assignment_counter++;
-        if (no_checking_counter == 0) {
-            checked_on_access_impl<true, true>(N, p_assignment_record_ids, cuboid, bitfield);
+        // Write out new assignment record IDs. Reference counting is already taken care of.
+        if constexpr (!UpdateRecords) {
+            assert(!vis_record_id);
+        }
+        else if constexpr (IsWindow) {
+            cuboid_to_intervals<size_t>(
+                input.begin_outer_extent, input.end_outer_extent,
+                input.begin_offset, input.end_offset,
+                input.begin_inner_extent, input.end_inner_extent,
+                [&] (size_t lo, size_t hi) {
+                    for (size_t i = lo; i < hi; ++i) {
+                        const node_id id{input.base[i].node_id};
+                        const auto iter = census.find(id);
+                        assert(iter != census.end());
+                        input.base[i].node_id = iter->second.new_node_id._1_index;
+                    }
+                }
+            );
         }
         else {
-            clear_visibility(N, p_assignment_record_ids);
+            input->node_id = census[0].second.new_node_id._1_index;  // Where decltype(input) is assignment_record_id*
         }
     }
 
-    void on_check_free(size_t N, assignment_record_id* p_assignment_record_ids, const ThreadCuboid& cuboid, uint32_t bitfield)
+    void on_r(assignment_record_id* p_record, const ThreadCuboid& cuboid, uint32_t bitfield)
     {
         if (no_checking_counter == 0) {
-            checked_on_access_impl<true, false>(N, p_assignment_record_ids, cuboid, bitfield);
+            checked_on_access_impl<false, true>(p_record, cuboid, bitfield);
+        }
+    }
+
+    void on_rw(assignment_record_id* p_record, const ThreadCuboid& cuboid, uint32_t bitfield)
+    {
+        if (no_checking_counter == 0) {
+            checked_on_access_impl<true, true>(p_record, cuboid, bitfield);
+        }
+    }
+
+    void on_r(AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield)
+    {
+        if (no_checking_counter == 0) {
+            checked_on_access_impl<false, true>(window, cuboid, bitfield);
+        }
+    }
+
+    void on_rw(AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield)
+    {
+        if (no_checking_counter == 0) {
+            checked_on_access_impl<true, true>(window, cuboid, bitfield);
+        }
+    }
+
+    void on_check_free(AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield)
+    {
+        if (no_checking_counter == 0) {
+            checked_on_access_impl<true, false>(window, cuboid, bitfield);
         }
     }
 
@@ -2253,17 +2386,13 @@ struct SyncvTable
 try { \
     if (table->failed) { \
         return; \
-    } \
-    table->operation_counter++;
+    }
 
 #define INTERFACE_EPILOGUE(table) \
 } \
 catch (...) { \
     table->failed = true; \
     throw; \
-} \
-if (table->operation_counter == table->debug_operation_id) { \
-    table->debug_validate_state(); \
 }
 
 SyncvTable* new_syncv_table(const syncv_init_t& init)
@@ -2271,8 +2400,6 @@ SyncvTable* new_syncv_table(const syncv_init_t& init)
     SyncvTable* table = new SyncvTable;
     table->original_memory_budget = init.memory_budget;
     table->current_memory_budget = init.memory_budget;
-    table->debug_assignment_id = init.debug_assignment_id;
-    table->debug_operation_id = init.debug_operation_id;
     return table;
 }
 
@@ -2291,24 +2418,38 @@ void SyncvTableDeleter::operator() (SyncvTable* victim) const
     delete victim;
 }
 
-void on_r(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield)
+void on_r(SyncvTable* table, assignment_record_id* p_record, const ThreadCuboid& cuboid, uint32_t bitfield)
 {
     INTERFACE_PROLOGUE(table)
-    table->on_r(N, array, cuboid, bitfield);
+    table->on_r(p_record, cuboid, bitfield);
     INTERFACE_EPILOGUE(table)
 }
 
-void on_rw(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield)
+void on_rw(SyncvTable* table, assignment_record_id* p_record, const ThreadCuboid& cuboid, uint32_t bitfield)
 {
     INTERFACE_PROLOGUE(table)
-    table->on_rw(N, array, cuboid, bitfield);
+    table->on_rw(p_record, cuboid, bitfield);
     INTERFACE_EPILOGUE(table)
 }
 
-void on_check_free(SyncvTable* table, size_t N, assignment_record_id* array, const ThreadCuboid& cuboid, uint32_t bitfield)
+void on_r(SyncvTable* table, AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield)
 {
     INTERFACE_PROLOGUE(table)
-    table->on_check_free(N, array, cuboid, bitfield);
+    table->on_r(window, cuboid, bitfield);
+    INTERFACE_EPILOGUE(table)
+}
+
+void on_rw(SyncvTable* table, AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield)
+{
+    INTERFACE_PROLOGUE(table)
+    table->on_rw(window, cuboid, bitfield);
+    INTERFACE_EPILOGUE(table)
+}
+
+void on_check_free(SyncvTable* table, AssignmentRecordWindow window, const ThreadCuboid& cuboid, uint32_t bitfield)
+{
+    INTERFACE_PROLOGUE(table)
+    table->on_check_free(window, cuboid, bitfield);
     INTERFACE_EPILOGUE(table)
 }
 

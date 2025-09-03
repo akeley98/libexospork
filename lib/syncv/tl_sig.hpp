@@ -49,8 +49,8 @@ struct TlSigInterval
 
     void assert_valid() const
     {
-        assert(qual_bits() != 0);
-        assert(tid_lo <= tid_hi);
+        CAMSPORK_REQUIRE_CMP(qual_bits(), !=, 0, "Invalid TlSigInterval");
+        CAMSPORK_REQUIRE_CMP(tid_lo, <=, tid_hi, "Invalid TlSigInterval");
     }
 
     uint32_t vis_level() const
@@ -108,8 +108,8 @@ struct TlSigInterval
         const bool tid_disjoint = tid_hi <= other.tid_lo || other.tid_hi <= tid_lo;
         uint32_t this_qual_bits = qual_bits();
         const uint32_t other_qual_bits = other.qual_bits();
-        assert(this_qual_bits != 0);
-        assert(other_qual_bits != 0);
+        CAMSPORK_REQUIRE_CMP(this_qual_bits, !=, 0, "Invalid empty qual-tl set");
+        CAMSPORK_REQUIRE_CMP(other_qual_bits, !=, 0, "Invalid empty qual-tl set");
         return !tid_disjoint && 0 != (this_qual_bits & other_qual_bits & qual_bits_mask);
     }
 };

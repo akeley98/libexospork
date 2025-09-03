@@ -166,29 +166,29 @@ class ProgramExec
 
         if constexpr (node->is_window) {
             eval_tmp_extent(node);
-            // TODO cuboid_to_intervals should move into the syncv_table implementation.
-            cuboid_to_intervals<size_t>(
-                slot.extent().begin(), slot.extent().end(),
-                tmp_offset.begin(), tmp_offset.end(),
-                tmp_extent.begin(), tmp_extent.end(),
-                [&] (size_t lo, size_t hi)
-                {
-                    if (node->is_mutate) {
-                        on_rw(env.p_syncv_table.get(), hi - lo, slot.data() + lo, env.prepare_thread_cuboid(), bitfield);
-                    }
-                    else {
-                        on_r(env.p_syncv_table.get(), hi - lo, slot.data() + lo, env.prepare_thread_cuboid(), bitfield);
-                    }
-                }
-            );
+
+            AssignmentRecordWindow window{};
+            window.base = slot.data();
+            window.begin_outer_extent = &*slot.extent().begin();
+            window.end_outer_extent = &*slot.extent().end();
+            window.begin_offset = &*tmp_offset.begin();
+            window.end_offset = &*tmp_offset.end();
+            window.begin_inner_extent = &*tmp_extent.begin();
+            window.end_inner_extent = &*tmp_extent.end();
+            if (node->is_mutate) {
+                on_rw(env.p_syncv_table.get(), window, env.prepare_thread_cuboid(), bitfield);
+            }
+            else {
+                on_r(env.p_syncv_table.get(), window, env.prepare_thread_cuboid(), bitfield);
+            }
         }
         else {
             if (node->is_mutate) {
-                on_rw(env.p_syncv_table.get(), 1, &slot.idx(tmp_offset.begin(), tmp_offset.end()),
+                on_rw(env.p_syncv_table.get(), &slot.idx(tmp_offset.begin(), tmp_offset.end()),
                     env.prepare_thread_cuboid(), bitfield);
             }
             else {
-                on_r(env.p_syncv_table.get(), 1, &slot.idx(tmp_offset.begin(), tmp_offset.end()),
+                on_r(env.p_syncv_table.get(), &slot.idx(tmp_offset.begin(), tmp_offset.end()),
                     env.prepare_thread_cuboid(), bitfield);
             }
         }
@@ -535,8 +535,6 @@ static const syncv_init_t default_table_init
 {
     "PLACEHOLDER_FILENAME.txt",
     UINT32_MAX,
-    0,
-    0,
 };
 
 static const uint32_t static_uint32_max = UINT32_MAX;

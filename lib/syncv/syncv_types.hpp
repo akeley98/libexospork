@@ -36,8 +36,6 @@ struct syncv_init_t
     // TODO remove unused stuff (or use it).
     const char* filename;
     uint64_t memory_budget;
-    uint64_t debug_assignment_id;
-    uint64_t debug_operation_id;
 };
 
 struct SyncvCheckFail : std::runtime_error

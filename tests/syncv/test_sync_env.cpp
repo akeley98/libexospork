@@ -44,12 +44,12 @@ void test_sync_env()
     for (uint32_t w = 0; w < warp_count; ++w) {
         for (uint32_t tid = w * 32; tid < w * 32 + 32; ++tid) {
             ThreadCuboid cuboid = simple_cuboid(32 * warp_count, tid, tid+1);
-            on_rw(table, 1, &foobar[tid], cuboid, sig_generic | TlSigInterval::ordered_bits);
+            on_rw(table, &foobar[tid], cuboid, sig_generic | TlSigInterval::ordered_bits);
         }
 
         for (uint32_t tid = w * 32; tid < w * 32 + 32; ++tid) {
             ThreadCuboid cuboid = simple_cuboid(32 * warp_count, tid, tid+1);
-            on_r(table, 1, &foobar[tid], cuboid, sig_generic | TlSigInterval::ordered_bits);
+            on_r(table, &foobar[tid], cuboid, sig_generic | TlSigInterval::ordered_bits);
         }
     }
 
@@ -65,7 +65,7 @@ void test_sync_env()
         for (uint32_t tid = 0; tid < 32 * warp_count; ++tid) {
             ThreadCuboid cuboid = simple_cuboid(32 * warp_count, tid, tid+1);
             for (uint32_t i = 0; i < 32 * warp_count; ++i) {
-                on_r(table, 1, &foobar[i], cuboid, sig_generic | TlSigInterval::ordered_bits);
+                on_r(table, &foobar[i], cuboid, sig_generic | TlSigInterval::ordered_bits);
             }
 
             if (tid > 3 && tid < 33) {
@@ -84,7 +84,7 @@ void test_sync_env()
         // This should fail if the above barrier is skipped (WAR)
         for (uint32_t tid = 0; tid < 32 * warp_count; ++tid) {
             ThreadCuboid cuboid = simple_cuboid(32 * warp_count, tid, tid+1);
-            on_rw(table, 1, &foobar[tid], cuboid, sig_generic | TlSigInterval::ordered_bits);
+            on_rw(table, &foobar[tid], cuboid, sig_generic | TlSigInterval::ordered_bits);
         }
 
         maybe_validate(table);

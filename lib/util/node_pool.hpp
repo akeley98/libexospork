@@ -43,6 +43,12 @@ struct id
     }
 };
 
+template <typename Stream, typename ListNode>
+Stream& operator<<(Stream& stream, id<ListNode> node_id)
+{
+    return stream << node_id._1_index;
+}
+
 // Non-threadsafe memory pool for allocating singly-linked list nodes.
 // Each node is referenced by integer index, rather than pointer;
 // the index only refers to nodes as long as the pool hasn't been deleted.
