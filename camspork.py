@@ -634,6 +634,24 @@ if __name__ == "__main__":
         print("%2i %i" % (i, env.read_value("fib", i)))
 
     @camspork.program
+    def extent_test(b: camspork.ProgramBuilder):
+        buf = b.add_variable("buf")
+        b.SyncEnvAlloc(buf[10, 16])
+        with b.ParallelBlock(4):
+            tid = b.add_variable("tid")
+            with b.ThreadsFor(tid, 0, 4, 0, 0, 1):
+                with b.If(tid == 0):
+                    b.SyncEnvAccess(buf[0, 1], 1, 1, is_mutate=False, is_ooo=False)
+                    b.SyncEnvAccess(buf[0, 2], 1, 1, is_mutate=False, is_ooo=False)
+                    b.SyncEnvAccess(buf[0, 3], 1, 1, is_mutate=False, is_ooo=False)
+                    b.SyncEnvAccess(buf[0, 4], 1, 1, is_mutate=False, is_ooo=False)
+                b.SyncEnvAccess(buf[tid, 2 * tid], 1, 1, is_mutate=False, is_ooo=False, extent=[6, 5])
+    print(extent_test)
+    env = ProgramEnv(extent_test)
+    env.set_debug_validation_enable(True)
+    env.exec()
+
+    @camspork.program
     def fence_test(b: camspork.ProgramBuilder):
         num_tasks = b.add_variable("num_tasks")
         fence_enable = b.add_variable("fence_enable")

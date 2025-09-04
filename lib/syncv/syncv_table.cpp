@@ -1833,13 +1833,6 @@ struct SyncvTable
             const ThreadCuboid& cuboid,
             uint32_t bitfield)
     {
-        // We will memoize the new visibility record once.
-        const uint32_t vis_record_refcnt = UpdateRecords ? assignment_record_window_size(input) : 0u;
-        nodepool::id<VisRecordListNode<IsMutate>> vis_record_id{};
-        if (vis_record_refcnt != 0) {
-            vis_record_id = memoize_new_vis_record<IsMutate>(cuboid, bitfield, vis_record_refcnt);
-        }
-
         using node_id = nodepool::id<AssignmentRecord>;
 
         // If the input is a window, take a census of all assignment record IDs in the input window.
@@ -1899,7 +1892,10 @@ struct SyncvTable
             }
         };
 
-        auto copy_on_write_update = [&] (node_id old_id, AssignmentRecordCensusEntry& entry)
+        auto copy_on_write_update = [&] (
+                node_id old_id,
+                AssignmentRecordCensusEntry& entry,
+                nodepool::id<VisRecordListNode<IsMutate>> new_vis_record_id)
         {
             // If the old assignment record has ID 0 (doesn't exist ... was presumed empty, no reads, no mutates)
             // or its refcnt exceeds the use count, then we cannot modify the assignment record in-place.
@@ -1934,14 +1930,14 @@ struct SyncvTable
                 // TODO this will change for atomic operations.
                 reset_assignment_record(&assignment_record);
                 AssignmentRecordMutateNode& node = alloc_default_node(&assignment_record.mutate_vis_records_head_id);
-                node.vis_record_id = vis_record_id;
+                node.vis_record_id = new_vis_record_id;
                 assignment_record.last_augment_counter_bits = augment_counter;
             }
             else {
                 // Add the new visibility record to the list of read visibility records.
                 nodepool::id<AssignmentRecordReadNode> read_id;
                 AssignmentRecordReadNode& read_node = alloc_default_node(&read_id);
-                read_node.vis_record_id = vis_record_id;
+                read_node.vis_record_id = new_vis_record_id;
                 insert_next_node(&assignment_record.read_vis_records_head_id, read_id);
 
                 // If we leave things as-is, read vis records may build up indefinitely for variables that are written
@@ -1958,11 +1954,19 @@ struct SyncvTable
             }
         };
 
-        // Check & update all assignment records once.
+        // We will memoize the new visibility record once.
+        nodepool::id<VisRecordListNode<IsMutate>> vis_record_id{};
+        if (UpdateRecords && !census.empty()) {
+            const uint32_t initial_refcnt = uint32_t(census.size());
+            // fprintf(stderr, "INITIAL_REFCNT %u\n", initial_refcnt);
+            vis_record_id = memoize_new_vis_record<IsMutate>(cuboid, bitfield, initial_refcnt);
+        }
+
+        // Check & update all distinct assignment records once.
         for (auto& pair : census) {
             check(pair.first);
             if constexpr (UpdateRecords) {
-                copy_on_write_update(pair.first, pair.second);
+                copy_on_write_update(pair.first, pair.second, vis_record_id);
             }
         }
 
