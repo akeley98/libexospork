@@ -63,6 +63,12 @@ struct AssignmentRecordWindow
     const uint32_t* end_inner_extent;
 };
 
+struct SyncvDebugValidateInput
+{
+    size_t size;
+    const assignment_record_id* p_records;
+};
+
 
 
 // *** Primary Implemented Interface ***
@@ -87,11 +93,9 @@ void end_no_checking(SyncvTable* table);
 
 
 // *** Debug Inspection Interface ***
-void debug_register_records(SyncvTable* table, size_t N, assignment_record_id* records);
-void debug_unregister_records(SyncvTable* table, size_t N, assignment_record_id* records);
 void debug_get_read_vis_record_data(const SyncvTable* table, uint32_t id, VisRecordDebugData* out);
 void debug_get_mutate_vis_record_data(const SyncvTable* table, uint32_t id, VisRecordDebugData* out);
-void debug_validate_state(SyncvTable* table);
+void debug_validate_state(SyncvTable* table, size_t input_count, const SyncvDebugValidateInput* p_inputs);
 void debug_pre_delete_check(SyncvTable* table);
 
 }

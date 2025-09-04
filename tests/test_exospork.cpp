@@ -212,12 +212,12 @@ void simple_fence_test(uint32_t n_tasks, bool have_fence)
 
 int main()
 {
+    test_sync_env();
     camspork::simple_fence_test(1, true);
     camspork::simple_fence_test(2, true);
     camspork::simple_fence_test(1, false);
     camspork::threads_program_test();
     camspork::test_cuboid_util();
-    test_sync_env();
     camspork::fib_program_test();
     return 0;
 }

@@ -21,7 +21,7 @@ using namespace camspork;
 
 void test_sync_env()
 {
-    const bool do_validate = false;
+    const bool do_validate = true;
     constexpr uint32_t warp_count = 32;
 
     syncv_init_t init{};
@@ -32,12 +32,12 @@ void test_sync_env()
     SyncvTable* table = table_unique_ptr.get();
 
     assignment_record_id foobar[32 * warp_count] = {};
-    debug_register_records(table, 32 * warp_count, foobar);
 
-    auto maybe_validate = [do_validate] (SyncvTable* table)
+    auto maybe_validate = [do_validate, &foobar] (SyncvTable* table)
     {
         if (do_validate) {
-            debug_validate_state(table);
+            SyncvDebugValidateInput input{32 * warp_count, foobar};
+            debug_validate_state(table, 1, &input);
         }
     };
 
@@ -45,6 +45,7 @@ void test_sync_env()
         for (uint32_t tid = w * 32; tid < w * 32 + 32; ++tid) {
             ThreadCuboid cuboid = simple_cuboid(32 * warp_count, tid, tid+1);
             on_rw(table, &foobar[tid], cuboid, sig_generic | TlSigInterval::ordered_bits);
+            maybe_validate(table);
         }
 
         for (uint32_t tid = w * 32; tid < w * 32 + 32; ++tid) {
@@ -128,7 +129,6 @@ void test_sync_env()
     free_barriers(table, 1, &bar);
     clear_visibility(table, 32 * warp_count, foobar);
     maybe_validate(table);
-    debug_unregister_records(table, 32 * warp_count, foobar);
     debug_pre_delete_check(table);
 }
 

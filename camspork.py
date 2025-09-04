@@ -299,6 +299,10 @@ _set_value = lib.camspork_set_value
 _set_value.restype = c_int
 _set_value.argtypes = (c_void_p, Varname, c_uint32, POINTER(value_t), value_t)
 
+_set_debug_validation_enable = lib.camspork_set_debug_validation_enable
+_set_debug_validation_enable.restype = c_int
+_set_debug_validation_enable.argtypes = (c_void_p, c_uint32)
+
 
 def to_binop(op):
     if isinstance(op, binop):
@@ -596,6 +600,9 @@ class ProgramEnv:
         c_idxs = (value_t * c_dim)(*idxs)
         check_return(_set_value(self._env, self.get_varname(var), c_dim, c_idxs, arg))
 
+    def set_debug_validation_enable(self, flag):
+        check_return(_set_debug_validation_enable(self._env, bool(flag)))
+
 
 if __name__ == "__main__":
     @camspork.program
@@ -619,6 +626,7 @@ if __name__ == "__main__":
             b.MutateValue(_fib[_iter], "/", 5)
 
     env = ProgramEnv(fib)
+    env.set_debug_validation_enable(True)
     print(fib)
     env.alloc_scalar_value("fib_size", 22)
     env.exec()
@@ -630,25 +638,26 @@ if __name__ == "__main__":
         num_tasks = b.add_variable("num_tasks")
         fence_enable = b.add_variable("fence_enable")
         buf = b.add_variable("buf")
-        b.SyncEnvAlloc(buf[256])
-        with b.ParallelBlock(256):
+        b.SyncEnvAlloc(buf[64])
+        with b.ParallelBlock(64):
             task = b.add_variable("task")
             tid = b.add_variable("tid")
             global tasks_for
             with b.TasksFor(task, 0, num_tasks) as tasks_for:
-                with b.ThreadsFor(tid, 0, 256, 0, 0, 1):
+                with b.ThreadsFor(tid, 0, 64, 0, 0, 1):
                     b.SyncEnvAccess(buf[tid], 1, 1, is_mutate=True, is_ooo=False)
                 with b.If(fence_enable):
                     b.Fence(True, 1, 1, 1)
-                with b.ThreadsFor(tid, 0, 256, 0, 0, 1):
+                with b.ThreadsFor(tid, 0, 64, 0, 0, 1):
                     s = b.add_variable("s")
-                    with b.SeqFor(s, 0, 256):
+                    with b.SeqFor(s, 0, 64):
                         b.SyncEnvAccess(buf[s], 1, 1, is_mutate=False, is_ooo=False)
     print(fence_test)
     print(tasks_for.node)
     print(tasks_for.body)
     print(tasks_for.orelse)
     env = ProgramEnv(fence_test)
+    env.set_debug_validation_enable(True)
     env.alloc_scalar_value("num_tasks", 1)
     env.alloc_scalar_value("fence_enable", 1)
     env.exec()

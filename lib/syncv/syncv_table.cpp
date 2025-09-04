@@ -408,12 +408,6 @@ struct SyncvTable
     IntervalBucket<false, bucket_level_count - 1> read_top_level_bucket;
     IntervalBucket<true, bucket_level_count - 1> mutate_top_level_bucket;
 
-    // Debugging/Testing
-    // Record pointers to registered assignment_record_id arrays (plus the array sizes).
-    // Ordinarily we rely on the user alone to remember these arrays, but we need to cache them if we are
-    // doing consistency checks.
-    Map<assignment_record_id*, size_t> debug_registered_assignment_records;
-
 
 
     // *** Memory Pool Allocators; Linked List Manipulation ***
@@ -881,7 +875,7 @@ struct SyncvTable
         bool equal = true;
         cuboid.to_intervals([&] (uint32_t tid_lo, uint32_t tid_hi)
         {
-            if (node_id == 0) {
+            if (!node_id) {
                 equal = false;
             }
             else {
@@ -994,7 +988,7 @@ struct SyncvTable
                 if (data.tid_lo > missing_threads_lo) {
                     break;
                 }
-                missing_threads_lo = data.tid_hi;
+                missing_threads_lo = std::max(missing_threads_lo, data.tid_hi);
             }
             const bool local_visible = missing_threads_lo >= tid_hi;
             all_visible &= local_visible;
@@ -1116,9 +1110,9 @@ struct SyncvTable
     {
         const nodepool::id<VisRecordListNode<IsMutate>> old_id = *p_id;
         nodepool::id<VisRecordListNode<IsMutate>> id = old_id;
-        assert(id);
+        CAMSPORK_REQUIRE(id, "null input to remove_forwarding");
         VisRecordListNode<IsMutate>* p_node = &get(id);
-        assert(p_node->refcnt != 0);
+        CAMSPORK_REQUIRE_CMP(p_node->refcnt, !=, 0, "unexpected 0 refcnt");
 
         if (!p_node->is_forwarded()) {
             return p_node->base_data;  // No ID change
@@ -1127,15 +1121,15 @@ struct SyncvTable
         // Resolve the forwarding.
         do {
             id = p_node->camspork_next_id;
-            assert(id);
+            CAMSPORK_REQUIRE(id, "node in forwarding state but null next_id");
             p_node = &get(id);
-            assert(p_node->refcnt != 0);
+            CAMSPORK_REQUIRE_CMP(p_node->refcnt, !=, 0, "unexpected 0 refcnt");
         } while (p_node->is_forwarded());
 
-        assert(id != old_id);
+        CAMSPORK_REQUIRE_CMP(id, !=, old_id, "forwarded to itself");
         incref(id);
         decref(old_id);  // Will take care of deallocating chain of forwarding if needed.
-        assert(*p_id == old_id);
+        CAMSPORK_REQUIRE_CMP(*p_id, ==, old_id, "unexpected modification of *p_id");
         *p_id = id;
         return p_node->base_data;
     }
@@ -1146,15 +1140,15 @@ struct SyncvTable
     template <bool IsMutate>
     VisRecord const_resolve_forwarding(nodepool::id<VisRecordListNode<IsMutate>> id) const noexcept
     {
-        assert(id);
+        CAMSPORK_REQUIRE(id, "null input to const_resolve_forwarding");
         const VisRecordListNode<IsMutate>* p_node = &get(id);
-        assert(p_node->refcnt != 0);
+        CAMSPORK_REQUIRE_CMP(p_node->refcnt, !=, 0, "unexpected 0 refcnt");
 
         while (p_node->is_forwarded()) {
             id = p_node->camspork_next_id;
-            assert(id);
+            CAMSPORK_REQUIRE(id, "node in forwarding state but null next_id");
             p_node = &get(id);
-            assert(p_node->refcnt != 0);
+            CAMSPORK_REQUIRE_CMP(p_node->refcnt, !=, 0, "unexpected 0 refcnt");
         }
 
         return p_node->base_data;
@@ -1217,11 +1211,10 @@ struct SyncvTable
             const Command& command)
     {
         if constexpr (Type != BucketProcessType::Insert && BucketLevel < bucket_level_count - 1) {
-            // Left behind empty bucket that should have been de-allocated.
-            assert(!interval_bucket_is_empty(*p_bucket));
+            CAMSPORK_REQUIRE(!interval_bucket_is_empty(*p_bucket), "Left behind empty bucket that should have been de-allocated.");
         }
 
-        assert(relative_tid_lo < relative_tid_hi);  // Input interval needs to be non-empty
+        CAMSPORK_REQUIRE_CMP(relative_tid_lo, <, relative_tid_hi, "Input interval needs to be non-empty");
         constexpr bool ExactType = Type != BucketProcessType::MapAll;
         nodepool::id<VisRecordListNode<IsMutate>> result_id{};
 
@@ -1234,7 +1227,7 @@ struct SyncvTable
         auto visit_child = [this, p_bucket, relative_tid_lo, relative_tid_hi, &command] (uint32_t child_index)
         {
             nodepool::id<VisRecordListNode<IsMutate>> lambda_result_id = {};
-            assert(child_index < p_bucket->child_count);
+            CAMSPORK_REQUIRE_CMP(child_index, <, p_bucket->child_count, "out-of-range child_index");
             auto& child_ref = p_bucket->child_interval_buckets[child_index];
 
             if (!child_ref && Type != BucketProcessType::Insert) {
@@ -1253,6 +1246,9 @@ struct SyncvTable
                         child_ref.reset(new IntervalBucket<IsMutate, BucketLevel - 1>);
                         child_ref->p_parent = p_bucket;
                         child_ref->child_index_in_parent = child_index;
+                    }
+                    else {
+                        // Bottom-level interval bucket is just a node list.
                     }
                 }
 
@@ -1275,7 +1271,7 @@ struct SyncvTable
             }
             catch (...) {
                 if (!child_ref) {
-                    assert(p_bucket->nonempty_child_count > 0);
+                    CAMSPORK_REQUIRE_CMP(p_bucket->nonempty_child_count, >, 0, "should have been deleted");
                     p_bucket->nonempty_child_count--;
                 }
                 throw;
@@ -1283,7 +1279,7 @@ struct SyncvTable
 
             // Child bucket may have been deallocated for being empty.
             if (!child_ref) {
-                assert(p_bucket->nonempty_child_count);
+                CAMSPORK_REQUIRE_CMP(p_bucket->nonempty_child_count, >, 0, "should have been deleted");
                 p_bucket->nonempty_child_count--;
             }
             return lambda_result_id;
@@ -1337,7 +1333,7 @@ struct SyncvTable
 
         for (node_id id; (id = *p_id); ) {
             VisRecordListNode<IsMutate>& node = get(id);
-            assert(!node.is_forwarded());  // Should not be in memoization table.
+            CAMSPORK_REQUIRE(!node.is_forwarded(), "Should not be in memoization table.");
 
             if (lambda(node.base_data)) {
                 return p_id;
@@ -1363,13 +1359,13 @@ struct SyncvTable
                                                                                    uint32_t bitfield,
                                                                                    uint32_t added_refcnt)
     {
-        assert(added_refcnt != 0);
+        CAMSPORK_REQUIRE_CMP(added_refcnt, !=, 0, "cannot memoize w/ zero refcnt");
 
         NewVisRecordCommand command{&cuboid, bitfield, added_refcnt};
-        nodepool::id<VisRecordListNode<IsMutate>> id =
-                for_buckets<IsMutate, BucketProcessType::Insert>(cuboid.minimal_superset_interval(bitfield), command);
-        assert(id);
-        assert(equal(const_resolve_forwarding(id), cuboid, bitfield));
+        const TlSigInterval key = cuboid.minimal_superset_interval(bitfield);
+        nodepool::id<VisRecordListNode<IsMutate>> id = for_buckets<IsMutate, BucketProcessType::Insert>(key, command);
+        CAMSPORK_REQUIRE(id, "BucketProcessType::Insert search should not have given null");
+        CAMSPORK_REQUIRE(equal(const_resolve_forwarding(id), cuboid, bitfield), "memoization didn't work");
         return id;
     }
 
@@ -1387,18 +1383,18 @@ struct SyncvTable
         if (p_found_id) {
             // Existing memoized entry found.
             new_id = *p_found_id;
-            assert(new_id);
+            CAMSPORK_REQUIRE(new_id, "unexpected null from memoization table");
             get(new_id).refcnt += command.added_refcnt;
         }
         else {
             // Add memoized base visibility set entry to bucket of memoization table.
             new_id = alloc_visibility_record<IsMutate>(*command.p_cuboid, command.bitfield);
-            assert(!get(new_id).camspork_next_id);
+            CAMSPORK_REQUIRE(!get(new_id).camspork_next_id, "should have been initialized to null");
             get(new_id).refcnt = command.added_refcnt;
-            assert(!get(new_id).is_forwarded());
+            CAMSPORK_REQUIRE(!get(new_id).is_forwarded(), "should not be initialized in forwarding state");
             insert_next_node(p_bucket_head, new_id);
         }
-        assert(new_id);
+        CAMSPORK_REQUIRE(new_id, "unexpected null");
         return new_id;
     }
 
@@ -1414,9 +1410,9 @@ struct SyncvTable
     [[nodiscard]] nodepool::id<VisRecordListNode<IsMutate>> remove_memoized(
             const VisRecordListNode<IsMutate>* p_node) noexcept
     {
-        assert(p_node);
-        assert(p_node->refcnt == 0);
-        assert(!p_node->is_forwarded());
+        CAMSPORK_REQUIRE(p_node, "unexpected null");
+        CAMSPORK_REQUIRE_CMP(p_node->refcnt, ==, 0, "should still be memoized if kept alive elsewhere");
+        CAMSPORK_REQUIRE(!p_node->is_forwarded(), "forwarding state VisRecord would not be memoized");
 
         RemoveMemoizedCommand<IsMutate> command{p_node};
         auto bucket_key = minimal_superset_interval(p_node->base_data.visibility_set);
@@ -1449,8 +1445,8 @@ struct SyncvTable
     template <bool IsMutate>
     nodepool::id<VisRecordListNode<IsMutate>> find_memoized(const VisRecordListNode<IsMutate>* p_node) const noexcept
     {
-        assert(p_node);
-        assert(!p_node->is_forwarded());
+        CAMSPORK_REQUIRE(p_node, "unexpected null");
+        CAMSPORK_REQUIRE(!p_node->is_forwarded(), "forwarding state VisRecord would not be memoized");
 
         FindMemoizedCommand<IsMutate> command{p_node};
         auto bucket_key = minimal_superset_interval(p_node->base_data.visibility_set);
@@ -1486,11 +1482,11 @@ struct SyncvTable
     template <bool IsMutate>
     void memoize_or_forward(nodepool::id<VisRecordListNode<IsMutate>> id)
     {
-        assert(id);
+        CAMSPORK_REQUIRE(id, "unexpected null");
         VisRecordListNode<IsMutate>& node = get(id);
-        assert(node.refcnt != 0);
-        assert(!node.is_forwarded());
-        assert(!node.camspork_next_id);  // shouldn't be in any linked list (memoization bucket or forwarded?)
+        CAMSPORK_REQUIRE_CMP(node.refcnt, !=, 0, "should have nonzero refcnt");
+        CAMSPORK_REQUIRE(!node.is_forwarded(), "should not already be forwarded");
+        CAMSPORK_REQUIRE(!node.camspork_next_id, "shouldn't be in any linked list (memoization bucket or forwarded?)");
 
         MemoizeOrForwardCommand<IsMutate> command{id};
         auto bucket_key = minimal_superset_interval(node.base_data.visibility_set);
@@ -1513,13 +1509,14 @@ struct SyncvTable
         if (p_id) {
             // If equivalent memoized node found in bucket, forward input node to it.
             const nodepool::id fwd_id = *p_id;
-            assert(fwd_id);
-            assert(fwd_id != command.input_id);  // Trying to memoize something already in the memoization table.
+            CAMSPORK_REQUIRE(fwd_id, "unexpected null");
+            CAMSPORK_REQUIRE_CMP(fwd_id, !=, command.input_id, "Trying to memoize something already in the memoization table.");
 
             reset_vis_record_data(&input_node.base_data);  // Clear data to put visibility record into forwarding state.
             input_node.camspork_next_id = fwd_id;
-            assert(input_node.is_forwarded());
+            CAMSPORK_REQUIRE(input_node.is_forwarded(), "should now be in forwarding state");
             incref(fwd_id);  // Forwarding reference is owning.
+            // fprintf(stderr, "FWD %u -> %u [IsMutate=%i]\n", command.input_id._1_index, fwd_id._1_index, IsMutate);
         }
         else {
             // Insert input node to memoization bucket. No refcnt changes needed for memoization.
@@ -1587,6 +1584,7 @@ struct SyncvTable
         void update_for_sync(SyncvTable& env, VisRecord* p_record) const
         {
             if (env.remove_pending_await(p_record, await_id)) {
+                // TODO rethink this
                 assert(env.synchronizes_with<true>(*p_record, V1));
                 env.union_tl_sig_interval(p_record, IsMutate ? V2_full : V2_temporal);
             }
@@ -1639,12 +1637,12 @@ struct SyncvTable
             // *p_id will now be the ID of the node that formerly was after current_node, which (if not ID = 0)
             // is the node that we should process on the next iteration.
             VisRecordListNode<IsMutate>& current_node = get(remove_next_node(p_id));
-            assert(!current_node.camspork_next_id);// Should have been removed from list.
-            assert(!current_node.is_forwarded());  // Invalid empty visibility set (forwarding state memoized?)
+            CAMSPORK_REQUIRE(!current_node.camspork_next_id, "Should have been removed from list.");
+            CAMSPORK_REQUIRE(!current_node.is_forwarded(), "forwarding state memoized?");
 
             // Update the visibility record stored in the node.
             command.template update_for_sync<IsMutate>(*this, &current_node.base_data);
-            assert(p_id != &current_node.camspork_next_id);
+            CAMSPORK_REQUIRE_CMP(p_id, !=, &current_node.camspork_next_id, "something happened");
 
             // This is where the node might get re-inserted to the memoization table.
             // *p_id might change value here again, but it's guaranteed p_id doesn't point inside &current_node.
@@ -1659,7 +1657,7 @@ struct SyncvTable
                 // I'm fairly sure this is the only reason this branch should happen, due to how we insert nodes
                 // only at the head of buckets. If this assert goes off, the code may still be correct;
                 // this is just a warning-to-self to check that my mental model is correct.
-                assert(p_id == p_bucket_head);
+                CAMSPORK_REQUIRE_CMP(p_id, ==, p_bucket_head, "see source code note above");
                 p_id = &get(current_node_id).camspork_next_id;
             }
         }
@@ -1754,7 +1752,7 @@ struct SyncvTable
             state.arrive_tl_sigs = V1;
         }
         else {
-            assert(state.arrive_tl_sigs == V1);  // TODO should not be assertion
+            assert(state.arrive_tl_sigs == V1);  // TODO should not be assertion (but this should go away anyway).
         }
 
         update_vis_records_for_arrive(V1, transitive, await_id);
@@ -1863,7 +1861,7 @@ struct SyncvTable
             );
         }
         else {
-            census[0].first = node_id{*input};  // Where decltype(input) is assignment_record_id*
+            census[0].first = node_id{input->node_id};  // Where decltype(input) is assignment_record_id*
             census[0].second.count = 1;
         }
 
@@ -1970,7 +1968,7 @@ struct SyncvTable
 
         // Write out new assignment record IDs. Reference counting is already taken care of.
         if constexpr (!UpdateRecords) {
-            assert(!vis_record_id);
+            CAMSPORK_REQUIRE(!vis_record_id, "Fix !UpdateRecords code path to not leak vis_record_id");
         }
         else if constexpr (IsWindow) {
             cuboid_to_intervals<size_t>(
@@ -1981,7 +1979,7 @@ struct SyncvTable
                     for (size_t i = lo; i < hi; ++i) {
                         const node_id id{input.base[i].node_id};
                         const auto iter = census.find(id);
-                        assert(iter != census.end());
+                        CAMSPORK_REQUIRE(iter != census.end(), "fix census code");
                         input.base[i].node_id = iter->second.new_node_id._1_index;
                     }
                 }
@@ -2064,8 +2062,8 @@ struct SyncvTable
                 // This causes (next_id = *p_read_id) to change, so we don't have to update p_read_id.
                 // i.e. since we removed the next node, we're ready to process a new next node next iteration.
                 node_id victim_id = remove_next_node(p_read_id);
-                assert(victim_id == next_id);
-                assert(next_node.camspork_next_id == 0);
+                CAMSPORK_REQUIRE_CMP(victim_id, ==, next_id, "didn't remove expected node");
+                CAMSPORK_REQUIRE_CMP(next_node.camspork_next_id, ==, 0, "next_node should have been removed above");
                 decref(next_node.vis_record_id);
                 extend_free_list(victim_id);
             }
@@ -2099,7 +2097,7 @@ struct SyncvTable
     template <bool IsMutate>
     void debug_get_vis_record_data(uint32_t id, VisRecordDebugData* out) const
     {
-        assert(id);
+        CAMSPORK_REQUIRE(id, "unexpected null");
         const VisRecord record = const_resolve_forwarding(nodepool::id<VisRecordListNode<IsMutate>>{id});
 
         out->original_qual_tl = record.original_qual_tl;
@@ -2117,20 +2115,6 @@ struct SyncvTable
             out->pending_await_list.push_back(node.await_id);
             node_id = node.camspork_next_id;
         }
-    }
-
-    void debug_register_records(size_t N, assignment_record_id* array)
-    {
-        [[maybe_unused]] const bool unique = debug_registered_assignment_records.insert({array, N}).second;
-        assert(unique);
-    }
-
-    void debug_unregister_records(size_t N, assignment_record_id* array)
-    {
-        auto it = debug_registered_assignment_records.find(array);
-        assert(it != debug_registered_assignment_records.end());
-        assert(N == it->second);
-        debug_registered_assignment_records.erase(it);
     }
 
     template <typename ListNode>
@@ -2152,19 +2136,18 @@ struct SyncvTable
                 const refcnt_t expected_refcnt = refcnts[id._1_index - 1];
                 const bool is_free = free_node_ids.count(id);
                 if (is_free) {
-                    assert(expected_refcnt == 0);
+                    CAMSPORK_REQUIRE_CMP(expected_refcnt, ==, 0, "node on free list is referenced");
                 }
                 else {
-                    assert(expected_refcnt == tested_refcnt);
+                    CAMSPORK_REQUIRE_CMP(expected_refcnt, ==, tested_refcnt, "wrong refcnt");
                 }
             }
         }
     };
 
     // Massive function that verifies that the current state is legal.
-    // This only works if all of the user's arrays of assignment_record_id have been debug registered,
-    // which otherwise is not needed for correct operation of the SyncvTable.
-    void debug_validate_state() const
+    // This only works if all of the user's arrays of assignment_record_id have been passed.
+    void debug_validate_state(size_t input_count, const SyncvDebugValidateInput* p_inputs) const
     {
         std::tuple<
             RefcntDebug<AssignmentRecord>,
@@ -2194,7 +2177,7 @@ struct SyncvTable
             std::vector<refcnt_t>& refcnts =
                     std::get<RefcntDebug<typename decltype(id)::value_type>>(debug_refcnts).refcnts;
             if (id) {
-                assert(id._1_index <= refcnts.size());
+                CAMSPORK_REQUIRE_CMP(id._1_index, <=, refcnts.size(), "out-of-bounds node ID");
                 auto refcnt_before = refcnts.at(id._1_index - 1)++;
                 return refcnt_before == 0;
             }
@@ -2212,7 +2195,7 @@ struct SyncvTable
             nodepool::id<AssignmentRecordMutateNode> mutate_id = record.mutate_vis_records_head_id;
             while (mutate_id) {
                 const AssignmentRecordMutateNode& mutate_node = get(mutate_id);
-                assert(mutate_node.vis_record_id);
+                CAMSPORK_REQUIRE(mutate_node.vis_record_id, "unexpected null mutate_node");
                 record_owning(mutate_id);
                 record_owning(mutate_node.vis_record_id);
                 mutate_id = mutate_node.camspork_next_id;
@@ -2221,7 +2204,7 @@ struct SyncvTable
             nodepool::id<AssignmentRecordReadNode> read_id = record.read_vis_records_head_id;
             while (read_id) {
                 const AssignmentRecordReadNode& read_node = get(read_id);
-                assert(read_node.vis_record_id);
+                CAMSPORK_REQUIRE(read_node.vis_record_id, "unexpected null read_node");
                 record_owning(read_id);
                 record_owning(read_node.vis_record_id);
                 read_id = read_node.camspork_next_id;
@@ -2231,9 +2214,9 @@ struct SyncvTable
 
         // Count ownership references of AssignmentRecord.
         // Further count ownership references from AssignmentRecord to VisRecordListNode, AssignmentRecordVisNode
-        for (const auto& array_length_pair : debug_registered_assignment_records) {
-            assignment_record_id* ptr = array_length_pair.first;
-            size_t sz = array_length_pair.second;
+        for (size_t input_i = 0; input_i < input_count; ++input_i) {
+            const assignment_record_id* ptr = p_inputs[input_i].p_records;
+            size_t sz = p_inputs[input_i].size;
 
             for (size_t i = 0; i < sz; ++i) {
                 nodepool::id<AssignmentRecord> id{ptr[i].node_id};
@@ -2254,20 +2237,20 @@ struct SyncvTable
             const auto& node = get(id);
 
             if (node.is_forwarded()) {
-                assert(node.camspork_next_id);
+                CAMSPORK_REQUIRE(node.camspork_next_id, "in forwarding state, but forwarded-to node is null");
                 record_owning(node.camspork_next_id);
             }
             else {
                 for (nodepool::id<TlSigIntervalListNode> node_id = node.base_data.visibility_set; node_id; ) {
                     record_owning(node_id);
                     TlSigIntervalListNode this_node = get(node_id);
-                    assert(this_node.data.tid_hi > this_node.data.tid_lo);
-                    assert(this_node.data.qual_bits() != 0);
+                    CAMSPORK_REQUIRE_CMP(this_node.data.tid_hi, >, this_node.data.tid_lo, "invalid interval");
+                    CAMSPORK_REQUIRE_CMP(this_node.data.qual_bits(), !=, 0, "invalid empty qual-tl set");
 
                     auto next_id = this_node.camspork_next_id;
                     if (next_id) {
                         TlSigIntervalListNode next_node = get(next_id);
-                        assert(valid_adjacent(this_node.data, next_node.data));
+                        CAMSPORK_REQUIRE(valid_adjacent(this_node.data, next_node.data), "visibility set intervals not sorted properly");
                         node_id = next_id;
                     }
                     else {
@@ -2311,16 +2294,15 @@ struct SyncvTable
             while (id) {
                 // VisRecordListNode<IsMutate>
                 const auto& node = get(id);
-                assert(node.refcnt != 0);
-                assert(!node.is_forwarded());
+                CAMSPORK_REQUIRE_CMP(node.refcnt, !=, 0, "all memoized VisRecord should have nonzero refcnt");
+                CAMSPORK_REQUIRE(!node.is_forwarded(), "forwarding state VisRecord should not be memoized");
                 id = node.camspork_next_id;
             }
         };
 
         auto validate_child_buckets = [this, validate_bucket_linked_list] (const auto& bucket, auto validate)
         {
-            // Should always be 0 outside for_buckets<...>(...) otherwise the bucket is immortal.
-            assert(bucket.visitor_count == 0);
+            CAMSPORK_REQUIRE_CMP(bucket.visitor_count, ==, 0, "Should always be 0 outside for_buckets<...>(...) otherwise the bucket is immortal.");
             uint32_t real_nonempty_child_count = 0;
 
             for (uint32_t child_index = 0; child_index < bucket.child_count; ++child_index) {
@@ -2329,9 +2311,9 @@ struct SyncvTable
                 if constexpr (bucket.bucket_level != 1) {
                     if (child_bucket_id_or_ptr) {
                         auto& child_bucket = *child_bucket_id_or_ptr;
-                        assert(child_bucket.p_parent == &bucket);
-                        assert(child_bucket.child_index_in_parent == child_index);
-                        assert(!interval_bucket_is_empty(child_bucket));
+                        CAMSPORK_REQUIRE_CMP(child_bucket.p_parent, ==, &bucket, "wrong parent ptr");
+                        CAMSPORK_REQUIRE_CMP(child_bucket.child_index_in_parent, ==, child_index, "wrong child_index");
+                        CAMSPORK_REQUIRE(!interval_bucket_is_empty(child_bucket), "should have been deallocated");
                         validate(child_bucket, validate);
                     }
                 }
@@ -2342,7 +2324,7 @@ struct SyncvTable
                 }
             }
 
-            assert(bucket.nonempty_child_count == real_nonempty_child_count);
+            CAMSPORK_REQUIRE_CMP(bucket.nonempty_child_count, ==, real_nonempty_child_count, "wrong child count");
             validate_bucket_linked_list(bucket.bucket);
         };
         validate_child_buckets(read_top_level_bucket, validate_child_buckets);
@@ -2368,7 +2350,22 @@ struct SyncvTable
                     continue;
                 }
 
-                assert(id == find_memoized(&node));
+                try {
+                    CAMSPORK_REQUIRE_CMP(id, ==, find_memoized(&node), "memoization lookup is buggy");
+                }
+                catch (...) {
+                    fprintf(stderr, "is_mutate %i\n", int(node.is_mutate));
+                    VisRecord record = node.base_data;
+                    nodepool::id<TlSigIntervalListNode> interval_id = record.visibility_set;
+                    while (interval_id) {
+                        const TlSigIntervalListNode& node = get(interval_id);
+                        interval_id = node.camspork_next_id;
+                        const TlSigInterval data = node.data;
+                        fprintf(stderr, "[%u, %u, %u, %u]\n",
+                                data.tid_lo, data.tid_hi, data.qual_bits(), data.vis_level());
+                    }
+                    throw;
+                }
             }
         };
         memoize_self_check(nodepool::id<ReadVisRecordListNode>{});
@@ -2384,9 +2381,7 @@ struct SyncvTable
 
 #define INTERFACE_PROLOGUE(table) \
 try { \
-    if (table->failed) { \
-        return; \
-    }
+    CAMSPORK_REQUIRE(!table->failed, "Cannot continue using env after failure detected");
 
 #define INTERFACE_EPILOGUE(table) \
 } \
@@ -2503,7 +2498,7 @@ void begin_no_checking(SyncvTable* table)
 
 void end_no_checking(SyncvTable* table)
 {
-    assert(table->no_checking_counter);
+    CAMSPORK_REQUIRE(table->no_checking_counter, "end_no_checking without begin_no_checking");
     table->no_checking_counter--;
 }
 
@@ -2512,16 +2507,6 @@ void end_no_checking(SyncvTable* table)
 // *** Debug Inspection Interface ***
 
 
-
-void debug_register_records(SyncvTable* table, size_t N, assignment_record_id* records)
-{
-    table->debug_register_records(N, records);
-}
-
-void debug_unregister_records(SyncvTable* table, size_t N, assignment_record_id* records)
-{
-    table->debug_unregister_records(N, records);
-}
 
 void debug_get_read_vis_record_data(const SyncvTable* table, uint32_t id, VisRecordDebugData* out)
 {
@@ -2533,9 +2518,9 @@ void debug_get_mutate_vis_record_data(const SyncvTable* table, uint32_t id, VisR
     table->debug_get_vis_record_data<true>(id, out);
 }
 
-void debug_validate_state(SyncvTable* table)
+void debug_validate_state(SyncvTable* table, size_t input_count, const SyncvDebugValidateInput* p_inputs)
 {
-    table->debug_validate_state();
+    table->debug_validate_state(input_count, p_inputs);
 }
 
 void debug_pre_delete_check(SyncvTable* table)

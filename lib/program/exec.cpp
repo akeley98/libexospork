@@ -192,6 +192,7 @@ class ProgramExec
                     env.prepare_thread_cuboid(), bitfield);
             }
         }
+        env.maybe_syncv_debug_validate();
     }
 
     void operator() (const MutateValue* node)
@@ -205,16 +206,19 @@ class ProgramExec
     {
         on_fence(env.p_syncv_table.get(), node->V1_transitive, env.prepare_thread_cuboid(),
                 node->L1_qual_bits, node->L2_full_qual_bits, node->L2_temporal_qual_bits);
+        env.maybe_syncv_debug_validate();
     }
 
     void operator() (const Arrive*)
     {
         CAMSPORK_REQUIRE(0, "TODO: implement Arrive");
+        env.maybe_syncv_debug_validate();
     }
 
     void operator() (const Await*)
     {
         CAMSPORK_REQUIRE(0, "TODO: implement Await");
+        env.maybe_syncv_debug_validate();
     }
 
     void operator() (const ValueEnvAlloc* node)
@@ -240,11 +244,13 @@ class ProgramExec
             slot.reset();
             slot = VarSlotEntry<assignment_record_id>(tmp_extent);
         }
+        env.maybe_syncv_debug_validate();
     }
 
     void operator() (const SyncEnvFreeShard*)
     {
         CAMSPORK_REQUIRE(0, "TODO: implement SyncEnvFreeShard");
+        env.maybe_syncv_debug_validate();
     }
 
     void operator() (const BarrierEnvAlloc* node)
@@ -258,12 +264,14 @@ class ProgramExec
             slot.reset();
             slot = VarSlotEntry<barrier_id>(tmp_extent);
         }
+        env.maybe_syncv_debug_validate();
     }
 
     void operator() (const BarrierEnvFree* node)
     {
         VarSlotEntry<barrier_id>& slot = env.barrier_slot(node->name);
         free_barriers(env.p_syncv_table.get(), slot.size(), slot.data());
+        env.maybe_syncv_debug_validate();
     }
 
     struct BodyExecImpl
@@ -530,6 +538,7 @@ class ProgramExec
         env.var_slots.push_back({std::string(p_str, p_str + num_bytes), {}, {}, {}});
     }
 };
+// End ProgramExec
 
 static const syncv_init_t default_table_init
 {
@@ -563,6 +572,28 @@ void ProgramEnv::exec(StmtRef stmt)
 {
     ProgramExec(this).exec(stmt);
 }
+
+void ProgramEnv::set_debug_validation_enable(bool flag)
+{
+    const bool will_check = flag && !debug_validation_enable;
+    debug_validation_enable = flag;
+    if (will_check) {
+        syncv_debug_validate();
+    }
+}
+
+void ProgramEnv::syncv_debug_validate()
+{
+    std::vector<SyncvDebugValidateInput> inputs;
+    for (const VarSlotEnvs& slot : var_slots) {
+        const VarSlotEntry<assignment_record_id>* p_sync_env = &slot.sync;
+        if (const auto sz = p_sync_env->size()) {
+            inputs.push_back({sz, p_sync_env->data()});
+        }
+    }
+    debug_validate_state(p_syncv_table.get(), inputs.size(), inputs.data());
+}
+
 
 }  // end namespace camspork
 
@@ -644,6 +675,14 @@ int camspork_set_value(
 {
     CAMSPORK_API_PROLOGUE
     p_env->value_slot(name).idx(idxs, idxs + dims) = arg;
+    return 1;
+    CAMSPORK_API_EPILOGUE(0)
+}
+
+int camspork_set_debug_validation_enable(camspork::ProgramEnv* p_env, uint32_t flag)
+{
+    CAMSPORK_API_PROLOGUE
+    p_env->set_debug_validation_enable(flag);
     return 1;
     CAMSPORK_API_EPILOGUE(0)
 }

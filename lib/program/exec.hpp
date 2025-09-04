@@ -209,6 +209,7 @@ class ProgramEnv
     ThreadCuboid raw_thread_cuboid;  // Lazy task_index. Read with prepare_thread_cuboid.
     std::vector<VarSlotEnvs> var_slots;
     bool dirty_task_index = false;
+    bool debug_validation_enable = false;
 
   public:
     friend class ProgramExec;
@@ -289,6 +290,18 @@ class ProgramEnv
         return var_slots[name.slot()].barrier;
     }
 
+    void set_debug_validation_enable(bool flag);
+
+    __attribute__((always_inline))
+    void maybe_syncv_debug_validate()
+    {
+        if (debug_validation_enable) {
+            syncv_debug_validate();
+        }
+    }
+
+    void syncv_debug_validate();
+
   private:
     std::shared_ptr<char[]> make_shared_program_buffer(size_t buffer_size, const char* buffer)
     {
@@ -331,5 +344,7 @@ CAMSPORK_EXPORT int camspork_read_value(
 CAMSPORK_EXPORT int camspork_set_value(
         camspork::ProgramEnv* p_env, camspork::Varname name, uint32_t dims, const camspork::value_t* idxs,
         camspork::value_t arg);
+
+CAMSPORK_EXPORT int camspork_set_debug_validation_enable(camspork::ProgramEnv* p_env, uint32_t flag);
 
 // Return 0

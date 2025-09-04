@@ -148,17 +148,16 @@ struct ThreadCuboid
 
     TlSigInterval minimal_superset_interval(uint32_t bitfield) const
     {
-        const uint32_t task_offset = domain_num_threads() * task_index;
-        uint32_t tid_lo = task_offset;
-        uint32_t tid_hi = task_offset;
+        uint32_t tid_lo = task_index;
+        uint32_t tid_hi_inclusive = task_index;
         for (uint32_t dim_idx = 0; dim_idx < dim(); ++dim_idx) {
             const uint32_t domain_c = domain()[dim_idx];
             const uint32_t offset_c = offset()[dim_idx];
             const uint32_t box_c = box()[dim_idx];
             tid_lo = tid_lo * domain_c + offset_c;
-            tid_hi = tid_lo * domain_c + offset_c + box_c;
+            tid_hi_inclusive = tid_hi_inclusive * domain_c + (offset_c + box_c - 1u);
         }
-        return TlSigInterval{tid_lo, tid_hi, bitfield};
+        return TlSigInterval{tid_lo, tid_hi_inclusive + 1u, bitfield};
     }
 };
 
