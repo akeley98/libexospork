@@ -15,7 +15,7 @@ struct assignment_record_id
 {
     uint32_t node_id = 0;
 
-    operator bool() const
+    explicit operator bool() const
     {
         return node_id != 0;
     }
@@ -25,7 +25,7 @@ struct barrier_id
 {
     uint32_t data = 0;
 
-    operator bool() const
+    explicit operator bool() const
     {
         return data != 0;
     }

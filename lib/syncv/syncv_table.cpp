@@ -545,7 +545,7 @@ struct SyncvTable
                 // Non-forwarded (base) visibility record must be removed from memoization first.
                 auto memoized_id = remove_memoized(&node);
                 CAMSPORK_REQUIRE_CMP(id, ==, memoized_id, "should have been found in memoization table");
-                CAMSPORK_REQUIRE_CMP(get(memoized_id).camspork_next_id, ==, 0, "Should have been removed from bucket's list.");
+                CAMSPORK_REQUIRE(!get(memoized_id).camspork_next_id, "Should have been removed from bucket's list.");
                 free_single_vis_record(memoized_id);
             }
         }
@@ -2067,7 +2067,7 @@ struct SyncvTable
                 // i.e. since we removed the next node, we're ready to process a new next node next iteration.
                 node_id victim_id = remove_next_node(p_read_id);
                 CAMSPORK_REQUIRE_CMP(victim_id, ==, next_id, "didn't remove expected node");
-                CAMSPORK_REQUIRE_CMP(next_node.camspork_next_id, ==, 0, "next_node should have been removed above");
+                CAMSPORK_REQUIRE(!next_node.camspork_next_id, "next_node should have been removed above");
                 decref(next_node.vis_record_id);
                 extend_free_list(victim_id);
             }

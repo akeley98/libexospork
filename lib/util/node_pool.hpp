@@ -22,7 +22,7 @@ struct id
 
     uint32_t _1_index;
 
-    operator bool() const
+    explicit operator bool() const
     {
         return _1_index != 0;
     }

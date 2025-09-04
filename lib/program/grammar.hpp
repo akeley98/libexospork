@@ -123,7 +123,7 @@ struct NodeRef
     }
 
     // 0 used as "null" value (this can't be valid as the ProgramHeader is at offset 0).
-    operator bool() const
+    explicit operator bool() const
     {
         return raw_data != 0;
     }
@@ -346,7 +346,7 @@ struct Varname
 {
     uint32_t slot_1_index = 0;  // slot index + 1
 
-    operator bool() const
+    explicit operator bool() const
     {
         return slot_1_index != 0;
     }
